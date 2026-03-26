@@ -1,5 +1,5 @@
 # Set up a new project
-create_project FPGA-BASED-SDR ./ -part xc7a25tcsg325-2 -force
+create_project SDR ./ -part xc7a25tcsg325-2 -force
 
 set_property SIMULATOR_LANGUAGE Verilog [current_project]
 

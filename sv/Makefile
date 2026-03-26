@@ -4,7 +4,7 @@ setup:
 
 clean:
 	powershell -Command "Remove-Item -Force -ErrorAction SilentlyContinue *.log,*.jou,*.wdb,*.str, *.pb"
-	powershell -Command "Remove-Item -Recurse -Force -ErrorAction SilentlyContinue .Xil, HarmoniCore2.0.cache, HarmoniCore2.0.gen, HarmoniCore2.0.hw, HarmoniCore2.0.ip_user_files, HarmoniCore2.0.srcs"
+	powershell -Command "Remove-Item -Recurse -Force -ErrorAction SilentlyContinue .Xil, SDR.cache, SDR.gen, SDR.hw, SDR.ip_user_files, SDR.srcs"
 
 %.sim:
 	for %%f in (src\*.sv) do xvlog -sv %%f
