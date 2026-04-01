@@ -1,6 +1,11 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
+#include <math.h>
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/ringbuf.h"
 
 #include "nvs_flash.h"
 #include "esp_log.h"
@@ -10,34 +15,63 @@
 #include "esp_gap_bt_api.h"
 #include "esp_a2dp_api.h"
 
-#include <math.h>
-
 #define SAMPLE_RATE 44100
 #define TONE_FREQ 440.0f
+#define TONE_AMPLITUDE 8000.0f
 
-static const char *TAG = "BT_INIT";
+#define CHANNELS 2
+#define BYTES_PER_SAMPLE 2
+#define FRAME_SIZE (CHANNELS * BYTES_PER_SAMPLE)
+
+#define CHUNK_SAMPLES 256
+#define CHUNK_BYTES (CHUNK_SAMPLES * FRAME_SIZE)
+#define RINGBUF_SIZE (8 * 1024)
+
+static const char *TAG = "BT_AUDIO";
 static const char *TARGET_NAME = "WH-1000XM3";
+
 static bool already_connecting = false;
+static RingbufHandle_t audio_rb = NULL;
+static float phase = 0.0f;
 
-static int16_t audio_buffer[512];
-static float phase = 0;
-
-// PCM sin wave kinda not working its just a ringing
 static int32_t audio_data_cb(uint8_t *data, int32_t len)
 {
-    int16_t *samples = (int16_t *)data;
-    int sample_count = len / 2;
+    memset(data, 0, len); //incase its empty so silence
 
-    for (int i = 0; i < sample_count; i++) {
-        samples[i] = (int16_t)(sinf(phase) * 10000);
-        phase += 2 * M_PI * TONE_FREQ / SAMPLE_RATE;
-        if (phase > 2 * M_PI) phase -= 2 * M_PI;
+    size_t item_size;
+    // get audio data from ring buffer, block if empty
+    uint8_t *item = (uint8_t *)xRingbufferReceiveUpTo(audio_rb, &item_size, 0, len);
+
+    if (item) {
+        memcpy(data, item, item_size);
+        vRingbufferReturnItem(audio_rb, item);
     }
 
     return len;
 }
 
-// basically if we connect, start sending audio data
+static void tone_task(void *arg)
+{
+    int16_t samples[CHUNK_SAMPLES * 2]; //cause stereo
+
+    while (1) {
+        for (int i = 0; i < CHUNK_SAMPLES; i++) {
+            int16_t v = (int16_t)(sinf(phase) * TONE_AMPLITUDE);
+
+            samples[2 * i] = v;
+            samples[2 * i + 1] = v;
+
+            phase += 2.0f * (float)M_PI * TONE_FREQ / SAMPLE_RATE;
+            if (phase >= 2.0f * (float)M_PI) {
+                phase -= 2.0f * (float)M_PI;
+            }
+        }
+
+        // push to ring buffer, block if full
+        xRingbufferSend(audio_rb, samples, sizeof(samples), portMAX_DELAY);
+    }
+}
+
 static void a2dp_cb(esp_a2d_cb_event_t event, esp_a2d_cb_param_t *param)
 {
     if (event == ESP_A2D_CONNECTION_STATE_EVT) {
@@ -113,7 +147,7 @@ void bluetooth_stack_init(void)
     // initialize A2DP source role (we send audio files not receive)
     ESP_ERROR_CHECK(esp_a2d_source_init());
 
-     // called when audio data is needed will be replaced with FPGA generated data *****
+     // called when audio data is needed, pulls from buffer
     ESP_ERROR_CHECK(esp_a2d_source_register_data_callback(audio_data_cb));
 
     // start discovery
@@ -122,5 +156,16 @@ void bluetooth_stack_init(void)
 
 void app_main(void)
 {
+    // make ring buffer
+    audio_rb = xRingbufferCreate(RINGBUF_SIZE, RINGBUF_TYPE_BYTEBUF);
+    if (!audio_rb) {
+        ESP_LOGE(TAG, "Failed to create ring buffer");
+        return;
+    }
+
+    // fill the buffer with stuff, to be replaced with FPGA generated data *****
+    xTaskCreate(tone_task, "tone_task", 4096, NULL, 5, NULL);
+
+    // initialize bluetooth
     bluetooth_stack_init();
 }
