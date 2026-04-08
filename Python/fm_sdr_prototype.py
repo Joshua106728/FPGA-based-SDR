@@ -141,6 +141,7 @@ def low_pass_filter(iq_signal: np.ndarray, sample_rate: int) -> np.ndarray:
     nyquist_frequency = sample_rate / 2.0
     normalized_cutoff = LOW_PASS_CUTOFF_HZ / nyquist_frequency
     filter_coefficients = signal.firwin(num_filter_taps, normalized_cutoff, window="hamming")
+    print(filter_coefficients)
 
     # Apply the filter separately to the real (I) and imaginary (Q) parts
     filtered_i = signal.lfilter(filter_coefficients, 1.0, iq_signal.real)
@@ -402,8 +403,8 @@ def plot_pipeline(source_audio: np.ndarray,
     ax.legend()
 
     plt.tight_layout()
-    plt.savefig("Plots/fm_sdr_pipeline_plots.png", dpi=150)
-    print("[Plot] Saved to 'Plots/fm_sdr_pipeline_plots.png'.")
+    plt.savefig("fm_sdr_pipeline_plots.png", dpi=150)
+    print("[Plot] Saved to 'fm_sdr_pipeline_plots.png'.")
     plt.show()
 
 def run_pipeline(use_microphone: bool = False) -> None:
