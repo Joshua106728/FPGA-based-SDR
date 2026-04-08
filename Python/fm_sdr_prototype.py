@@ -1,3 +1,4 @@
+# testing my branch 
 import numpy as np
 import scipy.signal as signal
 import sounddevice as sd
@@ -203,6 +204,7 @@ def downsample_to_audio_rate(demodulated_audio: np.ndarray, input_sample_rate: i
     print(f"[Decimation] Downsampling {input_sample_rate} Hz → {output_sample_rate} Hz "
           f"(factor {DOWNSAMPLE_FACTOR})...")
 
+    #downsampled_audio = signal.resample_poly(demodulated_audio, 1, DOWNSAMPLE_FACTOR)
     downsampled_audio = signal.resample_poly(demodulated_audio, 1, DOWNSAMPLE_FACTOR)
 
     print(f"[Decimation] Done. Output rate = {output_sample_rate} Hz.")
