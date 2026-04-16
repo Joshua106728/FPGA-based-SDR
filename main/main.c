@@ -84,38 +84,44 @@ static void a2dp_cb(esp_a2d_cb_event_t event, esp_a2d_cb_param_t *param)
 
 static void gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param)
 {
-    if (event != ESP_BT_GAP_DISC_RES_EVT || already_connecting) {
-        return;
-    }
+    if (event == ESP_BT_GAP_DISC_RES_EVT && !already_connecting) {
+        uint8_t *name = NULL;
+        uint8_t len = 0;
 
-    uint8_t *name = NULL;
-    uint8_t len = 0;
+        // Find device name
+        for (int i = 0; i < param->disc_res.num_prop; i++) {
+            if (param->disc_res.prop[i].type == ESP_BT_GAP_DEV_PROP_EIR) {
+                name = esp_bt_gap_resolve_eir_data(
+                    (uint8_t *)param->disc_res.prop[i].val,
+                    ESP_BT_EIR_TYPE_CMPL_LOCAL_NAME,
+                    &len
+                );
+                break;
+            }
+        }
 
-    // Find devices name we can replace all this with just a MAC addr if we want to use a set speaker
-    for (int i = 0; i < param->disc_res.num_prop; i++) {
-        if (param->disc_res.prop[i].type == ESP_BT_GAP_DEV_PROP_EIR) {
-            name = esp_bt_gap_resolve_eir_data(
-                (uint8_t *)param->disc_res.prop[i].val,
-                ESP_BT_EIR_TYPE_CMPL_LOCAL_NAME,
-                &len
-            );
-            break;
+        if (!name) {
+            return;
+        }
+
+        printf("%.*s: %02x:%02x:%02x:%02x:%02x:%02x\n",
+            len, name,
+            param->disc_res.bda[0], param->disc_res.bda[1], param->disc_res.bda[2],
+            param->disc_res.bda[3], param->disc_res.bda[4], param->disc_res.bda[5]);
+
+        if (strlen(TARGET_NAME) == len && strncmp((char *)name, TARGET_NAME, len) == 0) {
+            already_connecting = true;
+            esp_bt_gap_cancel_discovery();
+            esp_a2d_source_connect(param->disc_res.bda);
         }
     }
 
-    if (!name) {
-        return;
-    }
-
-    printf("%.*s: %02x:%02x:%02x:%02x:%02x:%02x\n",
-           len, name,
-           param->disc_res.bda[0], param->disc_res.bda[1], param->disc_res.bda[2],
-           param->disc_res.bda[3], param->disc_res.bda[4], param->disc_res.bda[5]);
-
-    if (strlen(TARGET_NAME) == len && strncmp((char *)name, TARGET_NAME, len) == 0) {
-        already_connecting = true;
-        esp_bt_gap_cancel_discovery();
-        esp_a2d_source_connect(param->disc_res.bda);
+    // Restart discovery if it stopped and not connected
+    if (event == ESP_BT_GAP_DISC_STATE_CHANGED_EVT) {
+        if (param->disc_st_chg.state == ESP_BT_GAP_DISCOVERY_STOPPED && !already_connecting) {
+            ESP_LOGI(TAG, "Discovery stopped, restarting...");
+            esp_bt_gap_start_discovery(ESP_BT_INQ_MODE_GENERAL_INQUIRY, 10, 0);
+        }
     }
 }
 
@@ -150,7 +156,7 @@ void bluetooth_stack_init(void)
      // called when audio data is needed, pulls from buffer
     ESP_ERROR_CHECK(esp_a2d_source_register_data_callback(audio_data_cb));
 
-    // start discovery
+    // start discovery (event-driven, not in a loop)
     ESP_ERROR_CHECK(esp_bt_gap_start_discovery(ESP_BT_INQ_MODE_GENERAL_INQUIRY, 10, 0));
 }
 
