@@ -11,7 +11,7 @@ cutoff_hz = 20000
 taps = signal.firwin(num_taps, cutoff_hz, fs=fs_in)
 
 # 2. Quantize to 16-bit integers for the Arty-7 DSP slices
-quantized_taps = np.round(taps / np.max(np.abs(taps)) * 32767).astype(int)
+quantized_taps = np.round(taps / np.max(np.abs(taps)) * 131071).astype(int)
 
 # 3. Write COE file
 with open("sdr_decimator.coe", "w") as f:
