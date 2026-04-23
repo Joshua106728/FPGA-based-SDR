@@ -4,7 +4,9 @@
 `define TYPES
 
 package types;
-    parameter DW = 32;
+    parameter int DW = 32;
+    parameter int PCM_IN_W = 18;
+    parameter int PCM_W = 16;
 
 endpackage
 
