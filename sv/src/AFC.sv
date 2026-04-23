@@ -5,7 +5,7 @@ import types::*;
 module AFC(
     input  logic clk,
     input  logic rst,
-    input  logic signed [DW-1:0] sample_q18,
+    input  logic signed [PCM_IN_W-1:0] sample_q18,
     output logic sample_tick,
     output logic i2s_bclk,
     output logic i2s_ws,
