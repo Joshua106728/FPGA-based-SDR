@@ -141,7 +141,6 @@ def low_pass_filter(iq_signal: np.ndarray, sample_rate: int) -> np.ndarray:
     nyquist_frequency = sample_rate / 2.0
     normalized_cutoff = LOW_PASS_CUTOFF_HZ / nyquist_frequency
     filter_coefficients = signal.firwin(num_filter_taps, normalized_cutoff, window="hamming")
-    print(filter_coefficients)
 
     # Apply the filter separately to the real (I) and imaginary (Q) parts
     filtered_i = signal.lfilter(filter_coefficients, 1.0, iq_signal.real)
