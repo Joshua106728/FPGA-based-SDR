@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<wave_config>
+   <wave_state>
+   </wave_state>
+   <db_ref_list>
+      <db_ref path="AFC_sim.wdb" id="1">
+         <top_modules>
+            <top_module name="AFC_tb" />
+            <top_module name="types" />
+         </top_modules>
+      </db_ref>
+   </db_ref_list>
+   <zoom_setting>
+      <ZoomStartTime time="0 ns"></ZoomStartTime>
+      <ZoomEndTime time="2 us"></ZoomEndTime>
+   </zoom_setting>
+   <column_width_setting>
+      <NameColumnWidth column_width="320"></NameColumnWidth>
+      <ValueColumnWidth column_width="100"></ValueColumnWidth>
+   </column_width_setting>
+   <WVObjectSize size="11" />
+   <wvobject fp_name="/AFC_tb/clk" type="logic">
+      <obj_property name="ElementShortName">clk</obj_property>
+      <obj_property name="ObjectShortName">clk</obj_property>
+   </wvobject>
+   <wvobject fp_name="/AFC_tb/rst" type="logic">
+      <obj_property name="ElementShortName">rst</obj_property>
+      <obj_property name="ObjectShortName">rst</obj_property>
+   </wvobject>
+   <wvobject fp_name="/AFC_tb/sample_q18" type="array">
+      <obj_property name="ElementShortName">sample_q18[17:0]</obj_property>
+      <obj_property name="ObjectShortName">sample_q18[17:0]</obj_property>
+   </wvobject>
+   <wvobject fp_name="/AFC_tb/sample_tick" type="logic">
+      <obj_property name="ElementShortName">sample_tick</obj_property>
+      <obj_property name="ObjectShortName">sample_tick</obj_property>
+   </wvobject>
+   <wvobject type="divider" fp_name="divider4">
+      <obj_property name="label">I2S Outputs</obj_property>
+      <obj_property name="DisplayName">label</obj_property>
+   </wvobject>
+   <wvobject fp_name="/AFC_tb/i2s_bclk" type="logic">
+      <obj_property name="ElementShortName">i2s_bclk</obj_property>
+      <obj_property name="ObjectShortName">i2s_bclk</obj_property>
+   </wvobject>
+   <wvobject fp_name="/AFC_tb/i2s_ws" type="logic">
+      <obj_property name="ElementShortName">i2s_ws</obj_property>
+      <obj_property name="ObjectShortName">i2s_ws</obj_property>
+   </wvobject>
+   <wvobject fp_name="/AFC_tb/i2s_sd" type="logic">
+      <obj_property name="ElementShortName">i2s_sd</obj_property>
+      <obj_property name="ObjectShortName">i2s_sd</obj_property>
+   </wvobject>
+   <wvobject type="divider" fp_name="divider8">
+      <obj_property name="label">DUT Internal</obj_property>
+      <obj_property name="DisplayName">label</obj_property>
+   </wvobject>
+   <wvobject fp_name="/AFC_tb/dut/pcm16" type="array">
+      <obj_property name="ElementShortName">pcm16[15:0]</obj_property>
+      <obj_property name="ObjectShortName">pcm16[15:0]</obj_property>
+   </wvobject>
+   <wvobject fp_name="/AFC_tb/dut/tx/bit_index" type="array">
+      <obj_property name="ElementShortName">bit_index</obj_property>
+      <obj_property name="ObjectShortName">bit_index</obj_property>
+   </wvobject>
+</wave_config>
