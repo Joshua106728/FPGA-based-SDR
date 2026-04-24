@@ -13,6 +13,10 @@ package types;
     localparam FRACTIONAL_BITS = 10;
     localparam RUNNING_SUM_ALPHA = 11;
 
+    // i2s output
+    parameter int PCM_IN_W = 18;
+    parameter int PCM_W = 16;
+
 endpackage
 
 `endif 
