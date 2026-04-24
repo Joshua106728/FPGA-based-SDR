@@ -2,6 +2,8 @@
 `timescale 1ns / 10ps
 `include "../include/types.sv"
 `include "../include/rf_cdc_if.vh"
+`include "../include/dc_offset_if.vh"
+`include "../include/i2s_if.vh"
 
 module top
 import types::*;
@@ -35,11 +37,19 @@ import types::*;
     // assign dcif.sample_q = rfif.sample_q;
     // assign dcif.sample_valid = rfif.sample_valid;
 
+    // I2S TX
+    i2s_if i2sif();
+    // assign i2sif.sample_q18 = dcif.sample_q;
+    // assign i2sif.sample_valid = dcif.sample_valid;
+
     // ---- Modules ----
     // RF Front End
     rf_cdc u_rf_cdc (.fpga_clk(fpga_clk), .n_rst(n_rst), .rfif(rfif));
      
      // DC Offset
     dc_offset u_dc_offset (.clk(fpga_clk), .n_rst(n_rst), .dcif(dcif));
+
+    // I2S TX
+    i2s_master_tx u_i2s_master_tx (.clk(fpga_clk), .n_rst(n_rst), .i2sif(i2sif));
 
 endmodule
