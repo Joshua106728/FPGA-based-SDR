@@ -1,25 +1,9 @@
 
 
-
-
 THE CODE SHOULD ALREADY BE FLASHED ONTO THE BOARD. In order to see serial output:
 
-
-First need to install Espressif: https://www.youtube.com/watch?v=D0fRc4XHBNk
-
-
-
-
-
-
-&#x20;you should press the little monitor symbol(Monitor Device) at the bottom taskbar
-
-
-If you have to flash new code to the board, click the little fire symbol (Build, Flash and Monitor) and it should automatically upload a new thing to the board
-
-
-
-
-
-Dependencies (USB and I2S)
-
+1. Install Espressif: https://www.youtube.com/watch?v=D0fRc4XHBNk
+2. Open the directory "rtl-sdr-ESP32" directory in vscode, once it loads you should see the little taskbar pop up
+3. Click the little fire symbol (Build, Flash and Monitor) and it should uplaod your program to the board
+4. Use the serial monitor. Should see like a printout "sending I2S xxx, high: xx low: xx "
+5. That means its working "hopefully"
