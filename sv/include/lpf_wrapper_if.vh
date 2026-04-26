@@ -15,15 +15,15 @@ interface lpf_wrapper_if;
 
     // OUTPUT
     logic signed [DATA_DW-1:0] lpf_i, lpf_q;
-    logic lpf_valid;
+    logic lpf_valid, lpf_ready;
 
     modport lpf_wrapper_inst (
         input corr_i, corr_q, corr_valid,
-        output lpf_i, lpf_q, logic lpf_i_valid, lpf_q_valid
+        output lpf_i, lpf_q, lpf_valid, lpf_ready
     );
 
     modport lpf_wrapper_tb (
-        input lpf_i, lpf_q, logic lpf_i_valid, lpf_q_valid,
+        input lpf_i, lpf_q, lpf_valid, lpf_ready,
         output corr_i, corr_q, corr_valid
     );
     

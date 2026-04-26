@@ -45,7 +45,6 @@ program dc_offset_test (
 
     string test_name;
     integer i;
-    integer log_file;
 
     initial begin
         dcif.sample_i = '0;

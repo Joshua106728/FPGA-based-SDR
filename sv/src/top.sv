@@ -33,10 +33,10 @@ import types::*;
     assign rfif.sd = rf_sd;
 
     // DC Offset
-    // dc_offset_if dcif();
-    // assign dcif.sample_i = rfif.sample_i;
-    // assign dcif.sample_q = rfif.sample_q;
-    // assign dcif.sample_valid = rfif.sample_valid;
+    dc_offset_if dcif();
+    assign dcif.sample_i = rfif.sample_i;
+    assign dcif.sample_q = rfif.sample_q;
+    assign dcif.sample_valid = rfif.sample_valid;
 
     assign led1 = 1'b1;
 
@@ -59,15 +59,30 @@ import types::*;
 
     // I2S TX
     i2s_if i2sif();
-    // assign i2sif.sample_q18 = dcif.sample_q;
-    // assign i2sif.sample_valid = dcif.sample_valid;
+    assign bt_ws  = i2sif.i2s_ws;
+    assign bt_sck = i2sif.i2s_bclk;
+    assign bt_sd  = i2sif.i2s_sd;
+
+    // Debug
+    (* mark_debug = "true" *) logic signed [PCM_IN_W-1:0] dbg_sample_q18;
+    (* mark_debug = "true" *) logic dbg_sample_valid_bt;
+
+    (* mark_debug = "true" *) logic dbg_bt_ws;
+    (* mark_debug = "true" *) logic dbg_bt_sck;
+    (* mark_debug = "true" *) logic dbg_bt_sd;
+
+    assign dbg_sample_q18  = i2sif.sample_q18;
+    assign dbg_sample_valid_bt = i2sif.sample_valid;
+    assign dbg_bt_ws  = bt_ws;
+    assign dbg_bt_sck = bt_sck;
+    assign dbg_bt_sd  = bt_sd;
 
     // ---- Modules ----
     // RF Front End
     rf_cdc u_rf_cdc (.fpga_clk(fpga_clk), .n_rst(n_rst), .rfif(rfif));
      
     // DC Offset
-    // dc_offset u_dc_offset (.clk(fpga_clk), .n_rst(n_rst), .dcif(dcif));
+    dc_offset u_dc_offset (.clk(fpga_clk), .n_rst(n_rst), .dcif(dcif));
 
     // I2S TX
     i2s_master_tx u_i2s_master_tx (.clk(fpga_clk), .n_rst(n_rst), .i2sif(i2sif));
