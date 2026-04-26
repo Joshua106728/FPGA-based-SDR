@@ -38,9 +38,16 @@ import types::*;
     assign dcif.sample_q = rfif.sample_q;
     assign dcif.sample_valid = rfif.sample_valid;
 
+    // Low Pass Filter
+    lpf_wrapper_if lpfif();
+    assign lpfif.corr_i = dcif.corr_i;
+    assign lpfif.corr_q = dcif.corr_q;
+    assign lpfif.corr_valid = dcif.corr_valid;
+
+    // Random LED
     assign led1 = 1'b1;
 
-    // Debug
+    // Debugging RF --> FPGA
     (* mark_debug = "true" *) logic dbg_rf_ws;
     (* mark_debug = "true" *) logic dbg_rf_sck;
     (* mark_debug = "true" *) logic dbg_rf_sd;
@@ -63,7 +70,7 @@ import types::*;
     assign bt_sck = i2sif.i2s_bclk;
     assign bt_sd  = i2sif.i2s_sd;
 
-    // Debug
+    // Debugging FPGA --> Bluetooth
     (* mark_debug = "true" *) logic signed [PCM_IN_W-1:0] dbg_sample_q18;
     (* mark_debug = "true" *) logic dbg_sample_valid_bt;
 
@@ -83,6 +90,9 @@ import types::*;
      
     // DC Offset
     dc_offset u_dc_offset (.clk(fpga_clk), .n_rst(n_rst), .dcif(dcif));
+
+    // Low Pass Filter
+    lpf_wrapper u_lpf_wrapper (.clk(fpga_clk), .n_rst(n_rst), .lpfif(lpfif));
 
     // I2S TX
     i2s_master_tx u_i2s_master_tx (.clk(fpga_clk), .n_rst(n_rst), .i2sif(i2sif));
