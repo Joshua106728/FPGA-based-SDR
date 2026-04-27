@@ -72,5 +72,6 @@ import types::*;
     assign lpfif.lpf_i     = lpf_i_data[DATA_DW-1:0];
     assign lpfif.lpf_q     = lpf_q_data[DATA_DW-1:0];
     assign lpfif.lpf_valid = lpf_i_valid & lpf_q_valid;
+    assign lpfif.lpf_ready = i_ready & q_ready;
 
 endmodule
