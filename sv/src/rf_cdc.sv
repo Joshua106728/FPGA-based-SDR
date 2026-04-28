@@ -14,7 +14,9 @@ import types::*;
         logic ws_clk;
         logic bit_clk;
     } rf_sync;
-    rf_sync ff1, ff2, ff3;
+
+    // ASYNC_REG keeps both FFs physically adjacent and prevents retiming across them
+    (* ASYNC_REG = "TRUE" *) rf_sync ff2, ff3;
 
     logic pending_frame, new_frame, can_sample;
     logic [SHIFT_LEN-1:0] shift, next_shift;
@@ -22,16 +24,12 @@ import types::*;
     // ************************************************************************
     // START THE CODE
     // ************************************************************************
-
-    // Synchronization
-    always_comb begin : assignFF1
-        ff1.ws_clk = rfif.ws;
-        ff1.bit_clk = rfif.sck;
-    end
-
-    always_ff @(posedge fpga_clk, negedge n_rst) begin : FF1_TO_FF2
+    always_ff @(posedge fpga_clk, negedge n_rst) begin : IN_TO_FF2
         if (~n_rst) ff2 <= '0;
-        else        ff2 <= ff1;
+        else begin
+            ff2.ws_clk  <= rfif.ws;
+            ff2.bit_clk <= rfif.sck;
+        end
     end
 
     always_ff @(posedge fpga_clk, negedge n_rst) begin : FF2_TO_FF3
@@ -39,7 +37,7 @@ import types::*;
         else        ff3 <= ff2;
     end
 
-    // Edge detection
+    // Edge detection (rising)
     assign can_sample = ff2.bit_clk & ~ff3.bit_clk;
 
     always_ff @(posedge fpga_clk, negedge n_rst) begin : whenToClear
