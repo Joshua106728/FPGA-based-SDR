@@ -54,9 +54,9 @@ static i2s_chan_handle_t tx_handle;    // This holds the I2S hardware handle
 // I2S STUFF #######################################################
 // #################################################################
 // ==========================================
-#define I2S_WS_GPIO     45   // Word Select
-#define I2S_BCK_GPIO    46   // Bit Clock
-#define I2S_DOUT_GPIO   47   // Data Out
+#define I2S_WS_GPIO     4    // Word Select
+#define I2S_BCK_GPIO    5    // Bit Clock
+#define I2S_DOUT_GPIO   6    // Data Out
 
 #define SDR_SAMPLE_RATE  250000 // 250 kHz
 void init_i2s_hardware(void)
