@@ -247,13 +247,27 @@ module de_emphasis_tb;
         begin
             logic signed [15:0] dc_in;
             logic signed [15:0] y_sw;
+            logic signed [15:0] y_prev_sw;
 
             dc_in = 16'sd10000;
             y_sw  = 16'sd0;
 
-            // Warm up: 10000 samples (>>3x the time constant)
+            // Run software model to true convergence (when y stops changing).
+            // With truncating integer arithmetic the IIR does NOT converge to
+            // dc_in — it converges to floor((ONE_MINUS_ALPHA * dc_in) / 18)
+            // which for dc_in=10000 is 6360, not 10000.
+            // We find the true converged value here and compare against that.
+            for (int k = 0; k < 1_000_000; k++) begin
+                y_prev_sw = y_sw;
+                y_sw      = iir_step(dc_in, y_sw);
+                if (y_sw === y_prev_sw) break;
+            end
+
+            $display("[DC converge] Software model converged to %0d (input=%0d)",
+                $signed(y_sw), $signed(dc_in));
+
+            // Drive same number of samples into DUT
             for (int k = 0; k < 10000; k++) begin
-                y_sw = iir_step(dc_in, y_sw);
                 @(posedge clk);
                 deif.audio_in    <= dc_in;
                 deif.audio_valid <= 1'b1;
@@ -263,15 +277,15 @@ module de_emphasis_tb;
 
             repeat(3) @(posedge clk);
 
-            // After convergence output should equal input ±2 LSBs
-            if ($signed(deif.audio_out[15:0]) >= $signed(dc_in) - 2 &&
-                $signed(deif.audio_out[15:0]) <= $signed(dc_in) + 2) begin
-                $display("PASS [DC converge] output=%0d, input=%0d (within ±2 LSB)",
-                    $signed(deif.audio_out[15:0]), $signed(dc_in));
+            // DUT output should match software model converged value ±1 LSB
+            if ($signed(deif.audio_out[15:0]) >= $signed(y_sw) - 1 &&
+                $signed(deif.audio_out[15:0]) <= $signed(y_sw) + 1) begin
+                $display("PASS [DC converge] DUT=%0d matches model=%0d (±1 LSB)",
+                    $signed(deif.audio_out[15:0]), $signed(y_sw));
                 pass_count++;
             end else begin
-                $display("FAIL [DC converge] output=%0d, expected≈%0d",
-                    $signed(deif.audio_out[15:0]), $signed(dc_in));
+                $display("FAIL [DC converge] DUT=%0d, model=%0d",
+                    $signed(deif.audio_out[15:0]), $signed(y_sw));
                 fail_count++;
             end
         end
