@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<wave_config>
+   <wave_state>
+   </wave_state>
+   <db_ref_list>
+      <db_ref path="i2s_master_tx_sim.wdb" id="1">
+         <top_modules>
+            <top_module name="i2s_master_tx_tb" />
+            <top_module name="types" />
+         </top_modules>
+      </db_ref>
+   </db_ref_list>
+   <zoom_setting>
+      <ZoomStartTime time="88,551.000 ns"></ZoomStartTime>
+      <ZoomEndTime time="88,557.001 ns"></ZoomEndTime>
+      <Cursor1Time time="88,595.000 ns"></Cursor1Time>
+   </zoom_setting>
+   <column_width_setting>
+      <NameColumnWidth column_width="320"></NameColumnWidth>
+      <ValueColumnWidth column_width="96"></ValueColumnWidth>
+   </column_width_setting>
+   <WVObjectSize size="18" />
+   <wvobject fp_name="/i2s_master_tx_tb/dut/clk" type="logic">
+      <obj_property name="ElementShortName">clk</obj_property>
+      <obj_property name="ObjectShortName">clk</obj_property>
+   </wvobject>
+   <wvobject fp_name="/i2s_master_tx_tb/dut/n_rst" type="logic">
+      <obj_property name="ElementShortName">n_rst</obj_property>
+      <obj_property name="ObjectShortName">n_rst</obj_property>
+   </wvobject>
+   <wvobject fp_name="/i2s_master_tx_tb/dut/bclk_phase" type="array">
+      <obj_property name="ElementShortName">bclk_phase[31:0]</obj_property>
+      <obj_property name="ObjectShortName">bclk_phase[31:0]</obj_property>
+   </wvobject>
+   <wvobject fp_name="/i2s_master_tx_tb/dut/bclk_phase_next" type="array">
+      <obj_property name="ElementShortName">bclk_phase_next[31:0]</obj_property>
+      <obj_property name="ObjectShortName">bclk_phase_next[31:0]</obj_property>
+   </wvobject>
+   <wvobject fp_name="/i2s_master_tx_tb/dut/bclk_next" type="logic">
+      <obj_property name="ElementShortName">bclk_next</obj_property>
+      <obj_property name="ObjectShortName">bclk_next</obj_property>
+   </wvobject>
+   <wvobject fp_name="/i2s_master_tx_tb/dut/bclk_fall" type="logic">
+      <obj_property name="ElementShortName">bclk_fall</obj_property>
+      <obj_property name="ObjectShortName">bclk_fall</obj_property>
+   </wvobject>
+   <wvobject fp_name="/i2s_master_tx_tb/dut/in_right" type="logic">
+      <obj_property name="ElementShortName">in_right</obj_property>
+      <obj_property name="ObjectShortName">in_right</obj_property>
+   </wvobject>
+   <wvobject fp_name="/i2s_master_tx_tb/dut/bit_cnt" type="array">
+      <obj_property name="ElementShortName">bit_cnt[15:0]</obj_property>
+      <obj_property name="ObjectShortName">bit_cnt[15:0]</obj_property>
+   </wvobject>
+   <wvobject fp_name="/i2s_master_tx_tb/dut/delay" type="logic">
+      <obj_property name="ElementShortName">delay</obj_property>
+      <obj_property name="ObjectShortName">delay</obj_property>
+   </wvobject>
+   <wvobject fp_name="/i2s_master_tx_tb/dut/pcm" type="array">
+      <obj_property name="ElementShortName">pcm[15:0]</obj_property>
+      <obj_property name="ObjectShortName">pcm[15:0]</obj_property>
+   </wvobject>
+   <wvobject fp_name="/i2s_master_tx_tb/dut/WORD_BITS" type="array">
+      <obj_property name="ElementShortName">WORD_BITS[31:0]</obj_property>
+      <obj_property name="ObjectShortName">WORD_BITS[31:0]</obj_property>
+   </wvobject>
+   <wvobject fp_name="/i2s_master_tx_tb/dut/ACC_BITS" type="array">
+      <obj_property name="ElementShortName">ACC_BITS[31:0]</obj_property>
+      <obj_property name="ObjectShortName">ACC_BITS[31:0]</obj_property>
+   </wvobject>
+   <wvobject fp_name="/i2s_master_tx_tb/dut/BCLK_STEP" type="array">
+      <obj_property name="ElementShortName">BCLK_STEP[31:0]</obj_property>
+      <obj_property name="ObjectShortName">BCLK_STEP[31:0]</obj_property>
+   </wvobject>
+   <wvobject fp_name="/i2s_master_tx_tb/dut/i2sif/sample_q18" type="array">
+      <obj_property name="ElementShortName">sample_q18[17:0]</obj_property>
+      <obj_property name="ObjectShortName">sample_q18[17:0]</obj_property>
+   </wvobject>
+   <wvobject fp_name="/i2s_master_tx_tb/dut/i2sif/sample_valid" type="logic">
+      <obj_property name="ElementShortName">sample_valid</obj_property>
+      <obj_property name="ObjectShortName">sample_valid</obj_property>
+   </wvobject>
+   <wvobject fp_name="/i2s_master_tx_tb/dut/i2sif/i2s_bclk" type="logic">
+      <obj_property name="ElementShortName">i2s_bclk</obj_property>
+      <obj_property name="ObjectShortName">i2s_bclk</obj_property>
+   </wvobject>
+   <wvobject fp_name="/i2s_master_tx_tb/dut/i2sif/i2s_ws" type="logic">
+      <obj_property name="ElementShortName">i2s_ws</obj_property>
+      <obj_property name="ObjectShortName">i2s_ws</obj_property>
+   </wvobject>
+   <wvobject fp_name="/i2s_master_tx_tb/dut/i2sif/i2s_sd" type="logic">
+      <obj_property name="ElementShortName">i2s_sd</obj_property>
+      <obj_property name="ObjectShortName">i2s_sd</obj_property>
+   </wvobject>
+</wave_config>
