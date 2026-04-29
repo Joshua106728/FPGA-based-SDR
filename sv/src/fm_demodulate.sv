@@ -68,7 +68,7 @@ module fm_demodulate #(
     always_comb begin
         s1_valid_c = fdif.i_valid;
         s1_i_c     = fdif.i_i;
-        s1_q_c     = fdif.i_i;
+        s1_q_c     = fdif.i_q;
 
         // delta_i = current I - previous I
         // delta_q = current Q - previous Q
@@ -292,7 +292,7 @@ module fm_demodulate #(
             // ----------------------------------------------------
             if (fdif.i_valid) begin
                 prev_i_r <= fdif.i_i;
-                prev_q_r <= fdif.i_i;
+                prev_q_r <= fdif.i_q;
             end
 
             // ----------------------------------------------------
