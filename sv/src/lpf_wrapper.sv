@@ -19,7 +19,7 @@ import types::*;
     logic signed [23:0] lpf_i_data, lpf_q_data;
 
     low_pass_filter lpf_i (
-        .aresetn(n_rst),                    // input wire aresetn
+        .s_axis_aresetn(n_rst),             // input wire aresetn
         .aclk(clk),                         // input wire aclk
         .s_axis_data_tvalid(i_valid),       // input wire s_axis_data_tvalid
         .s_axis_data_tready(i_ready),       // output wire s_axis_data_tready
