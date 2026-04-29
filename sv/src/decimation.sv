@@ -1,85 +1,48 @@
 `timescale 1ns / 1ps
 `include "../include/types.sv"
-`include "../include/decimation_if.vh"
-
-// ============================================================
-// decimation.sv
-// ============================================================
-// Downsamples the LPF output from SDR sample rate to audio rate
-// by keeping 1 out of every DECIM_FACTOR valid input samples.
-//
-// Pipeline position:
-//   lpf_wrapper → [decimation] → fm_demodulate
-//
-// The lpf_wrapper has already removed all energy above the audio
-// bandwidth, so simply dropping 4 out of 5 samples is safe —
-// no aliasing will occur.
-//
-// Python equivalent:
-//   audio_decimated = decimate(demod_filtered, DECIMATION, ftype='fir', zero_phase=True)
-//   (the FIR filtering is done by lpf_wrapper; this module only
-//    performs the "keep every Nth sample" downsampling step)
-//
-// Bit-width note:
-//   Input  — 18-bit signed (DATA_DW) from lpf_wrapper
-//   Output — 16-bit signed to match fm_demodulate_if (i_i, i_q)
-//   Truncation drops the 2 LSBs (least significant fractional bits)
-// ============================================================
 
 module decimation
 import types::*;
-#(
-    parameter int DECIM_FACTOR = 5  // SDR_RATE / AUDIO_RATE = 220500 / 44100 = 5
-)(
-    input  logic clk,
-    input  logic n_rst,
-    decimation_if.decimation_inst decimif
+(
+    input  logic                        clk,
+    input  logic                        n_rst,
+
+    // From LPF wrapper
+    input  logic signed [DATA_DW-1:0]  lpf_i,
+    input  logic signed [DATA_DW-1:0]  lpf_q,
+    input  logic                        lpf_valid,
+    input  logic                        lpf_ready,
+
+    // Decimated outputs
+    output logic signed [DATA_DW-1:0]  dec_i,
+    output logic signed [DATA_DW-1:0]  dec_q,
+    output logic                        dec_valid
 );
 
-    // --------------------------------------------------------
-    // Counter: tracks position within each decimation window
-    // Counts valid input samples 0 → DECIM_FACTOR-1, then wraps
-    // --------------------------------------------------------
-    logic [$clog2(DECIM_FACTOR)-1:0] count, next_count;
+    localparam int DECIM_FACTOR = 6;
 
-    // keep pulses high on the sample we want to pass through
-    logic keep;
-    assign keep = decimif.lpf_valid && (count == '0);
+    logic [2:0] sample_cnt;  // 0 -> 5
 
-    always_comb begin : counterNext
-        next_count = count;
-        if (decimif.lpf_valid) begin
-            if (count == DECIM_FACTOR - 1)
-                next_count = '0;
-            else
-                next_count = count + 1'b1;
-        end
-    end
-
-    always_ff @(posedge clk, negedge n_rst) begin : counterReg
-        if (~n_rst)
-            count <= '0;
-        else
-            count <= next_count;
-    end
-
-    // --------------------------------------------------------
-    // Output register
-    // Truncates 18-bit input to 16-bit output by dropping 2 LSBs.
-    // decim_valid is a single-cycle pulse, matching the convention
-    // used by dc_offset, lpf_wrapper, and rf_cdc.
-    // --------------------------------------------------------
-    always_ff @(posedge clk, negedge n_rst) begin : outputReg
+    always_ff @(posedge clk, negedge n_rst) begin : decim_proc
         if (~n_rst) begin
-            decimif.decim_i     <= '0;
-            decimif.decim_q     <= '0;
-            decimif.decim_valid <= 1'b0;
+            sample_cnt <= '0;
+            dec_i      <= '0;
+            dec_q      <= '0;
+            dec_valid  <= 1'b0;
         end else begin
-            decimif.decim_valid <= keep;
-            if (keep) begin
-                // Drop 2 LSBs: take top 16 bits of 18-bit DATA_DW sample
-                decimif.decim_i <= decimif.lpf_i[DATA_DW-1 -: 16];
-                decimif.decim_q <= decimif.lpf_q[DATA_DW-1 -: 16];
+            dec_valid <= 1'b0;
+
+            if (lpf_valid && lpf_ready) begin
+                if (sample_cnt == DECIM_FACTOR - 1)
+                    sample_cnt <= '0;
+                else
+                    sample_cnt <= sample_cnt + 1;
+
+                if (sample_cnt == '0) begin
+                    dec_i     <= lpf_i;
+                    dec_q     <= lpf_q;
+                    dec_valid <= 1'b1;
+                end
             end
         end
     end
