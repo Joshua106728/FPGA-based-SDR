@@ -8,22 +8,22 @@ import types::*;
 
 interface decimation_if;
 
-    // INPUT — from lpf_wrapper (18-bit DATA_DW)
+    // INPUTS (from LPF wrapper)
     logic signed [DATA_DW-1:0] lpf_i, lpf_q;
-    logic lpf_valid;
+    logic lpf_valid, lpf_ready;
 
-    // OUTPUT — to fm_demodulate (16-bit to match fm_demodulate_if)
-    logic signed [15:0] decim_i, decim_q;
-    logic decim_valid;
+    // OUTPUTS (decimated)
+    logic signed [DATA_DW-1:0] dec_i, dec_q;
+    logic dec_valid;
 
     modport decimation_inst (
-        input  lpf_i, lpf_q, lpf_valid,
-        output decim_i, decim_q, decim_valid
+        input  lpf_i, lpf_q, lpf_valid, lpf_ready,
+        output dec_i, dec_q, dec_valid
     );
 
     modport decimation_tb (
-        input  decim_i, decim_q, decim_valid,
-        output lpf_i, lpf_q, lpf_valid
+        input  dec_i, dec_q, dec_valid,
+        output lpf_i, lpf_q, lpf_valid, lpf_ready
     );
 
 endinterface
