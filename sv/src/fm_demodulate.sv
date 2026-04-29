@@ -353,222 +353,465 @@
 
 // endmodule
 
+// `timescale 1ns / 1ps
+// `include "fm_demodulate_if.vh"
+
+// // ============================================================
+// // fm_demodulate.sv
+// // ============================================================
+// // FM IQ discriminator — recovers audio from FM-modulated I/Q samples.
+// //
+// // Pipeline position:
+// //   lpf_wrapper → [fm_demodulate] → decimation
+// //
+// // Algorithm (IQ discriminator):
+// //   audio = (I*dQ - Q*dI) / (I^2 + Q^2) * K
+// //
+// // where K = round(32767 * SDR_RATE / (2*pi*MAX_DEV))
+// //         = round(32767 * 220500 / (2*pi*75000))
+// //         = 15332
+// //
+// // Python equivalent (from fm_sdr_prototype.py):
+// //   dI = np.diff(I); dQ = np.diff(Q)
+// //   num = I*dQ - Q*dI
+// //   den = I^2 + Q^2
+// //   den = np.where(den < EPSILON, EPSILON, den)
+// //   audio = (num * K) / den
+// //
+// // IMPORTANT: we scale the NUMERATOR before dividing (num*K / den),
+// // NOT (num/den)*K. The latter loses precision because integer division
+// // of num/den floors to [-1, 0, 1] for typical FM signals.
+// //
+// // Pipeline stages:
+// //   Stage 0: register previous I/Q (for delta computation)
+// //   Stage 1: compute dI, dQ (registered)
+// //   Stage 2: compute num = I*dQ - Q*dI, den = I^2 + Q^2 (registered)
+// //   Stage 3: clamp den >= EPSILON (registered)
+// //   Stage 4: scale num: num_scaled = num * K (registered)
+// //   Stage 5: divide: quot = num_scaled / den (registered)
+// //   Stage 6: saturate to OUT_W (registered output)
+// //
+// // Bit widths:
+// //   IN_W    = 16  (I/Q input)
+// //   DIFF_W  = 17  (dI, dQ = 16-bit subtraction can grow 1 bit)
+// //   PROD_W  = 33  (I*dQ or Q*dI = 16*17)
+// //   NUM_W   = 34  (I*dQ - Q*dI)
+// //   SQ_W    = 32  (I*I or Q*Q = 16*16, treated unsigned)
+// //   DEN_W   = 33  (I^2 + Q^2)
+// //   K_W     = 15  (K=15332 fits in 15 bits unsigned)
+// //   SNUM_W  = 49  (NUM_W + K_W = 34+15)
+// //   QUOT_W  = 49  (same as SNUM_W, quotient of 49-bit / 33-bit)
+// //   OUT_W   = 16
+// // ============================================================
+
+// module fm_demodulate #(
+//     parameter int IN_W      = 16,
+//     parameter int OUT_W     = 16,
+//     parameter int EPSILON   = 16,    // minimum denominator (avoids div-by-zero)
+
+//     // K = round(32767 * SDR_RATE / (2*pi*MAX_DEV))
+//     //   = round(32767 * 220500 / (2*pi*75000))
+//     //   = 15332
+//     parameter int K         = 15332
+// )(
+//     input logic clk,
+//     input logic n_rst,
+//     fm_demodulate_if.fd fdif
+// );
+
+//     // --------------------------------------------------------
+//     // Derived widths
+//     // --------------------------------------------------------
+//     localparam int DIFF_W  = IN_W + 1;          // 17
+//     localparam int PROD_W  = IN_W + DIFF_W;     // 33
+//     localparam int NUM_W   = PROD_W + 1;        // 34  (subtraction)
+//     localparam int SQ_W    = 2 * IN_W;          // 32
+//     localparam int DEN_W   = SQ_W + 1;          // 33
+//     localparam int K_W     = 15;                // K=15332 < 2^15
+//     localparam int SNUM_W  = NUM_W + K_W;       // 49  (num * K)
+//     localparam int QUOT_W  = SNUM_W;            // 49  (quot = num_scaled / den)
+
+//     // --------------------------------------------------------
+//     // Stage 0: store previous I/Q samples
+//     // --------------------------------------------------------
+//     logic signed [IN_W-1:0] prev_i_r, prev_q_r;
+
+//     // --------------------------------------------------------
+//     // Stage 1: delta computation
+//     //   dI = I[n] - I[n-1]
+//     //   dQ = Q[n] - Q[n-1]
+//     // --------------------------------------------------------
+//     logic                     s1_valid_c, s1_valid_r;
+//     logic signed [IN_W-1:0]   s1_i_c,    s1_i_r;
+//     logic signed [IN_W-1:0]   s1_q_c,    s1_q_r;
+//     logic signed [DIFF_W-1:0] s1_dI_c,   s1_dI_r;
+//     logic signed [DIFF_W-1:0] s1_dQ_c,   s1_dQ_r;
+
+//     always_comb begin
+//         s1_valid_c = fdif.i_valid;
+//         s1_i_c     = fdif.i_i;
+//         s1_q_c     = fdif.i_q;
+//         s1_dI_c    = $signed(fdif.i_i) - $signed(prev_i_r);
+//         s1_dQ_c    = $signed(fdif.i_q) - $signed(prev_q_r); // was fdif.i_i — bug fixed
+//     end
+
+//     // --------------------------------------------------------
+//     // Stage 2: numerator and denominator
+//     //   num = I*dQ - Q*dI
+//     //   den = I^2  + Q^2
+//     // --------------------------------------------------------
+//     logic                      s2_valid_c, s2_valid_r;
+//     logic signed [NUM_W-1:0]   s2_num_c,   s2_num_r;
+//     logic        [DEN_W-1:0]   s2_den_c,   s2_den_r;
+
+//     logic signed [PROD_W-1:0]  s2_idq_c, s2_qdi_c;
+//     logic        [SQ_W-1:0]    s2_sq_i_c, s2_sq_q_c;
+
+//     always_comb begin
+//         s2_valid_c = s1_valid_r;
+//         s2_idq_c   = $signed(s1_i_r) * $signed(s1_dQ_r);
+//         s2_qdi_c   = $signed(s1_q_r) * $signed(s1_dI_r);
+//         s2_num_c   = $signed(s2_idq_c) - $signed(s2_qdi_c);
+//         s2_sq_i_c  = $unsigned($signed(s1_i_r) * $signed(s1_i_r));
+//         s2_sq_q_c  = $unsigned($signed(s1_q_r) * $signed(s1_q_r));
+//         s2_den_c   = s2_sq_i_c + s2_sq_q_c;
+//     end
+
+//     // --------------------------------------------------------
+//     // Stage 3: denominator clamp
+//     //   if den < EPSILON → den = EPSILON  (avoids division by zero)
+//     // --------------------------------------------------------
+//     logic                    s3_valid_c, s3_valid_r;
+//     logic signed [NUM_W-1:0] s3_num_c,   s3_num_r;
+//     logic        [DEN_W-1:0] s3_den_c,   s3_den_r;
+
+//     always_comb begin
+//         s3_valid_c = s2_valid_r;
+//         s3_num_c   = s2_num_r;
+//         s3_den_c   = (s2_den_r < DEN_W'(EPSILON)) ? DEN_W'(EPSILON) : s2_den_r;
+//     end
+
+//     // --------------------------------------------------------
+//     // Stage 4: scale numerator by K
+//     //   num_scaled = num * K
+//     //
+//     // This is done BEFORE division to preserve precision.
+//     // Integer division of num/den would floor to [-2,-1,0,1,2]
+//     // for typical FM signals, losing all fine detail.
+//     // Scaling first: (num * K) / den gives full 16-bit resolution.
+//     // --------------------------------------------------------
+//     logic                      s4_valid_c,  s4_valid_r;
+//     logic signed [SNUM_W-1:0]  s4_snum_c,   s4_snum_r;
+//     logic        [DEN_W-1:0]   s4_den_c,    s4_den_r;
+
+//     always_comb begin
+//         s4_valid_c = s3_valid_r;
+//         s4_snum_c  = $signed(s3_num_r) * $signed(SNUM_W'(K));
+//         s4_den_c   = s3_den_r;
+//     end
+
+//     // --------------------------------------------------------
+//     // Stage 5: divide
+//     //   quot = num_scaled / den
+//     //
+//     // Note: Xilinx synthesis will infer a multi-cycle divider here.
+//     // For timing closure you may want to replace this with a Xilinx
+//     // Divider Generator IP (use_dsp=yes, latency=~34 cycles) and
+//     // delay valid by the same latency using a shift register.
+//     // --------------------------------------------------------
+//     logic                     s5_valid_c, s5_valid_r;
+//     logic signed [QUOT_W-1:0] s5_quot_c,  s5_quot_r;
+
+//     always_comb begin
+//         s5_valid_c = s4_valid_r;
+//         s5_quot_c  = $signed(s4_snum_r) / $signed({1'b0, s4_den_r});
+//     end
+
+//     // --------------------------------------------------------
+//     // Stage 6: saturate to OUT_W
+//     //   Quotient range for FM broadcast: ~[-15332, 15332]
+//     //   which fits in 16-bit signed [-32768, 32767].
+//     //   Saturation guards against edge cases (silence, noise bursts).
+//     // --------------------------------------------------------
+//     localparam logic signed [OUT_W-1:0] SAT_MAX = {1'b0, {(OUT_W-1){1'b1}}}; //  32767
+//     localparam logic signed [OUT_W-1:0] SAT_MIN = {1'b1, {(OUT_W-1){1'b0}}}; // -32768
+
+//     logic                    s6_valid_c;
+//     logic signed [OUT_W-1:0] s6_audio_c;
+
+//     always_comb begin
+//         s6_valid_c = s5_valid_r;
+//         if ($signed(s5_quot_r) > $signed({{(QUOT_W-OUT_W){SAT_MAX[OUT_W-1]}}, SAT_MAX}))
+//             s6_audio_c = SAT_MAX;
+//         else if ($signed(s5_quot_r) < $signed({{(QUOT_W-OUT_W){SAT_MIN[OUT_W-1]}}, SAT_MIN}))
+//             s6_audio_c = SAT_MIN;
+//         else
+//             s6_audio_c = s5_quot_r[OUT_W-1:0];
+//     end
+
+//     // --------------------------------------------------------
+//     // Sequential pipeline registers
+//     // --------------------------------------------------------
+//     always_ff @(posedge clk or negedge n_rst) begin
+//         if (!n_rst) begin
+//             prev_i_r   <= '0;
+//             prev_q_r   <= '0;
+
+//             s1_valid_r <= '0; s1_i_r  <= '0; s1_q_r  <= '0;
+//             s1_dI_r    <= '0; s1_dQ_r <= '0;
+
+//             s2_valid_r <= '0; s2_num_r <= '0; s2_den_r <= '0;
+//             s3_valid_r <= '0; s3_num_r <= '0; s3_den_r <= '0;
+//             s4_valid_r <= '0; s4_snum_r <= '0; s4_den_r <= '0;
+//             s5_valid_r <= '0; s5_quot_r <= '0;
+
+//             fdif.o_valid <= 1'b0;
+//             fdif.o_audio <= '0;
+//         end else begin
+//             // Stage 0: latch prev samples only on valid input
+//             if (fdif.i_valid) begin
+//                 prev_i_r <= fdif.i_i;
+//                 prev_q_r <= fdif.i_q;
+//             end
+
+//             // Stage 1
+//             s1_valid_r <= s1_valid_c;
+//             s1_i_r     <= s1_i_c;
+//             s1_q_r     <= s1_q_c;
+//             s1_dI_r    <= s1_dI_c;
+//             s1_dQ_r    <= s1_dQ_c;
+
+//             // Stage 2
+//             s2_valid_r <= s2_valid_c;
+//             s2_num_r   <= s2_num_c;
+//             s2_den_r   <= s2_den_c;
+
+//             // Stage 3
+//             s3_valid_r <= s3_valid_c;
+//             s3_num_r   <= s3_num_c;
+//             s3_den_r   <= s3_den_c;
+
+//             // Stage 4
+//             s4_valid_r <= s4_valid_c;
+//             s4_snum_r  <= s4_snum_c;
+//             s4_den_r   <= s4_den_c;
+
+//             // Stage 5
+//             s5_valid_r <= s5_valid_c;
+//             s5_quot_r  <= s5_quot_c;
+
+//             // Stage 6 → output
+//             fdif.o_valid <= s6_valid_c;
+//             fdif.o_audio <= s6_audio_c;
+//         end
+//     end
+
+// endmodule
+
+/////////////////////////////////////////// PIPELINED
+
 `timescale 1ns / 1ps
 `include "fm_demodulate_if.vh"
 
 // ============================================================
-// fm_demodulate.sv
+// fm_demodulate.sv  (CORDIC-based, fully pipelined)
 // ============================================================
-// FM IQ discriminator — recovers audio from FM-modulated I/Q samples.
+// FM IQ discriminator — recovers audio from FM-modulated I/Q.
 //
 // Pipeline position:
 //   lpf_wrapper → [fm_demodulate] → decimation
 //
-// Algorithm (IQ discriminator):
-//   audio = (I*dQ - Q*dI) / (I^2 + Q^2) * K
+// Algorithm:
+//   The instantaneous frequency deviation is proportional to the
+//   phase difference between consecutive I/Q samples:
 //
-// where K = round(32767 * SDR_RATE / (2*pi*MAX_DEV))
-//         = round(32767 * 220500 / (2*pi*75000))
-//         = 15332
+//     phi_diff = atan2(Q[n]*I[n-1] - I[n]*Q[n-1],
+//                      I[n]*I[n-1] + Q[n]*Q[n-1])
 //
-// Python equivalent (from fm_sdr_prototype.py):
-//   dI = np.diff(I); dQ = np.diff(Q)
-//   num = I*dQ - Q*dI
-//   den = I^2 + Q^2
-//   den = np.where(den < EPSILON, EPSILON, den)
-//   audio = (num * K) / den
+//   This is atan2(Im(s[n]*conj(s[n-1])), Re(s[n]*conj(s[n-1])))
+//   which gives the true phase difference in [-pi, pi], valid as
+//   long as |dphi| < pi, i.e. max_dev < SDR_RATE/2 = 110250 Hz.
+//   For FM broadcast (max_dev = 75 kHz), this is satisfied.
 //
-// IMPORTANT: we scale the NUMERATOR before dividing (num*K / den),
-// NOT (num/den)*K. The latter loses precision because integer division
-// of num/den floors to [-1, 0, 1] for typical FM signals.
+//   audio = phi_diff * K_num >> K_SHIFT
+//   where K_num = round(32767 * SDR_RATE / (2 * MAX_DEV * 2^16))
+//               = 6165439,  K_SHIFT = 23
+//
+// Why CORDIC instead of cross-product discriminator:
+//   The cross-product approach gives sin(dphi) not dphi itself.
+//   For large deviations sin(dphi) ≠ dphi (e.g. at 75 kHz:
+//   dphi = 2.14 rad, sin(2.14) = 0.84 — 21% error).
+//   CORDIC gives the true angle with no division and runs at
+//   full clock rate with fixed, predictable latency.
 //
 // Pipeline stages:
-//   Stage 0: register previous I/Q (for delta computation)
-//   Stage 1: compute dI, dQ (registered)
-//   Stage 2: compute num = I*dQ - Q*dI, den = I^2 + Q^2 (registered)
-//   Stage 3: clamp den >= EPSILON (registered)
-//   Stage 4: scale num: num_scaled = num * K (registered)
-//   Stage 5: divide: quot = num_scaled / den (registered)
-//   Stage 6: saturate to OUT_W (registered output)
+//   Stage 0  : register prev I/Q                      (1 cycle)
+//   Stage 1  : compute cross, dot; clamp dot           (1 cycle)
+//   Stage 2  : right-shift cross/dot for CORDIC input  (1 cycle)
+//   Stage 3..N_ITER+2: CORDIC iterations (pipelined)  (N_ITER cycles)
+//   Stage N_ITER+3: multiply phi_diff * K_num          (1 cycle)
+//   Stage N_ITER+4: shift right + saturate → output    (1 cycle)
+//   Total latency: N_ITER + 4 = 20 cycles
 //
-// Bit widths:
-//   IN_W    = 16  (I/Q input)
-//   DIFF_W  = 17  (dI, dQ = 16-bit subtraction can grow 1 bit)
-//   PROD_W  = 33  (I*dQ or Q*dI = 16*17)
-//   NUM_W   = 34  (I*dQ - Q*dI)
-//   SQ_W    = 32  (I*I or Q*Q = 16*16, treated unsigned)
-//   DEN_W   = 33  (I^2 + Q^2)
-//   K_W     = 15  (K=15332 fits in 15 bits unsigned)
-//   SNUM_W  = 49  (NUM_W + K_W = 34+15)
-//   QUOT_W  = 49  (same as SNUM_W, quotient of 49-bit / 33-bit)
-//   OUT_W   = 16
+// Resource usage (vs old divider-based design):
+//   Old: 1× large combinational divider (~50 ns, dominates timing)
+//   New: N_ITER shift-add stages + 1× multiplier — fully pipelined,
+//        no combinational paths longer than one adder.
+//
+// Parameters (match Python prototype):
+//   SDR_RATE  = 220500 Hz
+//   MAX_DEV   = 75000 Hz
+//   K_num     = round(32767 * 220500 / (2 * 75000 * 65536)) = 6165439
+//   K_SHIFT   = 23
+//   EPSILON   = minimum dot product value (avoids atan2(0,0))
 // ============================================================
 
 module fm_demodulate #(
-    parameter int IN_W      = 16,
-    parameter int OUT_W     = 16,
-    parameter int EPSILON   = 16,    // minimum denominator (avoids div-by-zero)
-
-    // K = round(32767 * SDR_RATE / (2*pi*MAX_DEV))
-    //   = round(32767 * 220500 / (2*pi*75000))
-    //   = 15332
-    parameter int K         = 15332
+    parameter int IN_W    = 16,    // I/Q input width
+    parameter int OUT_W   = 16,    // audio output width
+    parameter int N_ITER  = 16,    // CORDIC iterations = pipeline depth
+    parameter int EPSILON = 256,   // min dot product after >>CROSSDOT_SHIFT
+    parameter int K_NUM   = 6165439, // audio scale numerator
+    parameter int K_SHIFT = 23     // audio scale right-shift
 )(
-    input logic clk,
-    input logic n_rst,
+    input  logic clk,
+    input  logic n_rst,
     fm_demodulate_if.fd fdif
 );
 
     // --------------------------------------------------------
     // Derived widths
     // --------------------------------------------------------
-    localparam int DIFF_W  = IN_W + 1;          // 17
-    localparam int PROD_W  = IN_W + DIFF_W;     // 33
-    localparam int NUM_W   = PROD_W + 1;        // 34  (subtraction)
-    localparam int SQ_W    = 2 * IN_W;          // 32
-    localparam int DEN_W   = SQ_W + 1;          // 33
-    localparam int K_W     = 15;                // K=15332 < 2^15
-    localparam int SNUM_W  = NUM_W + K_W;       // 49  (num * K)
-    localparam int QUOT_W  = SNUM_W;            // 49  (quot = num_scaled / den)
+    localparam int PROD_W      = 2 * IN_W;       // 32  cross/dot products
+    localparam int CROSSDOT_W  = PROD_W + 1;     // 33  sum of two products
+    localparam int CORDIC_XY_W = 24;             // CORDIC input width (after shift)
+    localparam int ANGLE_W     = 17;             // Q3.16 angle (signed 17-bit)
+    localparam int SCALED_W    = ANGLE_W + 23;   // phi * K_NUM before shift
+
+    // Right-shift applied to cross/dot before CORDIC input
+    // Prevents overflow: cross/dot are 33-bit, CORDIC input is 24-bit
+    // 33 - 24 = 9 bit shift (keep top 24 bits)
+    localparam int CROSSDOT_SHIFT = 9;
 
     // --------------------------------------------------------
-    // Stage 0: store previous I/Q samples
+    // Stage 0: register previous I/Q
     // --------------------------------------------------------
     logic signed [IN_W-1:0] prev_i_r, prev_q_r;
 
     // --------------------------------------------------------
-    // Stage 1: delta computation
-    //   dI = I[n] - I[n-1]
-    //   dQ = Q[n] - Q[n-1]
+    // Stage 1: compute cross and dot products
+    //   cross = Q[n]*I[n-1] - I[n]*Q[n-1]   (Im of conjugate product)
+    //   dot   = I[n]*I[n-1] + Q[n]*Q[n-1]   (Re of conjugate product)
     // --------------------------------------------------------
-    logic                     s1_valid_c, s1_valid_r;
-    logic signed [IN_W-1:0]   s1_i_c,    s1_i_r;
-    logic signed [IN_W-1:0]   s1_q_c,    s1_q_r;
-    logic signed [DIFF_W-1:0] s1_dI_c,   s1_dI_r;
-    logic signed [DIFF_W-1:0] s1_dQ_c,   s1_dQ_r;
+    logic signed [CROSSDOT_W-1:0] s1_cross_c, s1_dot_c;
+    logic signed [CROSSDOT_W-1:0] s1_cross_r, s1_dot_r;
+    logic                          s1_valid_c, s1_valid_r;
 
     always_comb begin
         s1_valid_c = fdif.i_valid;
-        s1_i_c     = fdif.i_i;
-        s1_q_c     = fdif.i_q;
-        s1_dI_c    = $signed(fdif.i_i) - $signed(prev_i_r);
-        s1_dQ_c    = $signed(fdif.i_q) - $signed(prev_q_r); // was fdif.i_i — bug fixed
+        s1_cross_c = $signed(fdif.i_q) * $signed(prev_i_r)
+                   - $signed(fdif.i_i) * $signed(prev_q_r);
+        s1_dot_c   = $signed(fdif.i_i) * $signed(prev_i_r)
+                   + $signed(fdif.i_q) * $signed(prev_q_r);
     end
 
     // --------------------------------------------------------
-    // Stage 2: numerator and denominator
-    //   num = I*dQ - Q*dI
-    //   den = I^2  + Q^2
+    // Stage 2: clamp dot (avoid atan2(0,0)), shift for CORDIC
     // --------------------------------------------------------
-    logic                      s2_valid_c, s2_valid_r;
-    logic signed [NUM_W-1:0]   s2_num_c,   s2_num_r;
-    logic        [DEN_W-1:0]   s2_den_c,   s2_den_r;
-
-    logic signed [PROD_W-1:0]  s2_idq_c, s2_qdi_c;
-    logic        [SQ_W-1:0]    s2_sq_i_c, s2_sq_q_c;
+    logic signed [CORDIC_XY_W-1:0] s2_cross_c, s2_dot_c;
+    logic signed [CORDIC_XY_W-1:0] s2_cross_r, s2_dot_r;
+    logic                            s2_valid_c, s2_valid_r;
 
     always_comb begin
         s2_valid_c = s1_valid_r;
-        s2_idq_c   = $signed(s1_i_r) * $signed(s1_dQ_r);
-        s2_qdi_c   = $signed(s1_q_r) * $signed(s1_dI_r);
-        s2_num_c   = $signed(s2_idq_c) - $signed(s2_qdi_c);
-        s2_sq_i_c  = $unsigned($signed(s1_i_r) * $signed(s1_i_r));
-        s2_sq_q_c  = $unsigned($signed(s1_q_r) * $signed(s1_q_r));
-        s2_den_c   = s2_sq_i_c + s2_sq_q_c;
+        // Clamp dot to EPSILON before shift to prevent atan2(0,0)
+        s2_dot_c   = (s1_dot_r >>> CROSSDOT_SHIFT < CORDIC_XY_W'($signed(EPSILON)))
+                     ? CORDIC_XY_W'($signed(EPSILON))
+                     : CORDIC_XY_W'(s1_dot_r >>> CROSSDOT_SHIFT);
+        s2_cross_c = CORDIC_XY_W'(s1_cross_r >>> CROSSDOT_SHIFT);
     end
 
     // --------------------------------------------------------
-    // Stage 3: denominator clamp
-    //   if den < EPSILON → den = EPSILON  (avoids division by zero)
+    // Stage 3..N_ITER+2: CORDIC atan2 (pipelined)
+    // Input:  dot  → x (real part, always positive for converging)
+    //         cross → y (imaginary part)
+    // Output: phi_diff = atan2(cross, dot)  in Q3.16
     // --------------------------------------------------------
-    logic                    s3_valid_c, s3_valid_r;
-    logic signed [NUM_W-1:0] s3_num_c,   s3_num_r;
-    logic        [DEN_W-1:0] s3_den_c,   s3_den_r;
+    logic                      cordic_valid_out;
+    logic signed [ANGLE_W-1:0] phi_diff;
+
+    cordic #(
+        .XY_W   (CORDIC_XY_W),
+        .ANGLE_W(ANGLE_W),
+        .N_ITER (N_ITER)
+    ) u_cordic (
+        .clk      (clk),
+        .n_rst    (n_rst),
+        .i_valid  (s2_valid_r),
+        .x_in     (s2_dot_r),
+        .y_in     (s2_cross_r),
+        .o_valid  (cordic_valid_out),
+        .angle_out(phi_diff)
+    );
+
+    // --------------------------------------------------------
+    // Stage N_ITER+3: scale phi_diff to audio range
+    //   audio_raw = phi_diff * K_NUM
+    // --------------------------------------------------------
+    logic signed [SCALED_W-1:0] s_scaled_c, s_scaled_r;
+    logic                        s_scaled_valid_c, s_scaled_valid_r;
 
     always_comb begin
-        s3_valid_c = s2_valid_r;
-        s3_num_c   = s2_num_r;
-        s3_den_c   = (s2_den_r < DEN_W'(EPSILON)) ? DEN_W'(EPSILON) : s2_den_r;
+        s_scaled_valid_c = cordic_valid_out;
+        s_scaled_c       = $signed(phi_diff) * $signed(SCALED_W'(K_NUM));
     end
 
     // --------------------------------------------------------
-    // Stage 4: scale numerator by K
-    //   num_scaled = num * K
-    //
-    // This is done BEFORE division to preserve precision.
-    // Integer division of num/den would floor to [-2,-1,0,1,2]
-    // for typical FM signals, losing all fine detail.
-    // Scaling first: (num * K) / den gives full 16-bit resolution.
+    // Stage N_ITER+4: right-shift + saturate to OUT_W
+    //   audio = audio_raw >> K_SHIFT, clipped to [-32768, 32767]
     // --------------------------------------------------------
-    logic                      s4_valid_c,  s4_valid_r;
-    logic signed [SNUM_W-1:0]  s4_snum_c,   s4_snum_r;
-    logic        [DEN_W-1:0]   s4_den_c,    s4_den_r;
+    localparam logic signed [OUT_W-1:0] SAT_MAX = {1'b0, {(OUT_W-1){1'b1}}};
+    localparam logic signed [OUT_W-1:0] SAT_MIN = {1'b1, {(OUT_W-1){1'b0}}};
+
+    logic signed [SCALED_W-1:0] s6_shifted_c;
+    logic signed [OUT_W-1:0]    s6_audio_c;
+    logic                        s6_valid_c;
 
     always_comb begin
-        s4_valid_c = s3_valid_r;
-        s4_snum_c  = $signed(s3_num_r) * $signed(SNUM_W'(K));
-        s4_den_c   = s3_den_r;
-    end
+        s6_valid_c   = s_scaled_valid_r;
+        s6_shifted_c = s_scaled_r >>> K_SHIFT;
 
-    // --------------------------------------------------------
-    // Stage 5: divide
-    //   quot = num_scaled / den
-    //
-    // Note: Xilinx synthesis will infer a multi-cycle divider here.
-    // For timing closure you may want to replace this with a Xilinx
-    // Divider Generator IP (use_dsp=yes, latency=~34 cycles) and
-    // delay valid by the same latency using a shift register.
-    // --------------------------------------------------------
-    logic                     s5_valid_c, s5_valid_r;
-    logic signed [QUOT_W-1:0] s5_quot_c,  s5_quot_r;
-
-    always_comb begin
-        s5_valid_c = s4_valid_r;
-        s5_quot_c  = $signed(s4_snum_r) / $signed({1'b0, s4_den_r});
-    end
-
-    // --------------------------------------------------------
-    // Stage 6: saturate to OUT_W
-    //   Quotient range for FM broadcast: ~[-15332, 15332]
-    //   which fits in 16-bit signed [-32768, 32767].
-    //   Saturation guards against edge cases (silence, noise bursts).
-    // --------------------------------------------------------
-    localparam logic signed [OUT_W-1:0] SAT_MAX = {1'b0, {(OUT_W-1){1'b1}}}; //  32767
-    localparam logic signed [OUT_W-1:0] SAT_MIN = {1'b1, {(OUT_W-1){1'b0}}}; // -32768
-
-    logic                    s6_valid_c;
-    logic signed [OUT_W-1:0] s6_audio_c;
-
-    always_comb begin
-        s6_valid_c = s5_valid_r;
-        if ($signed(s5_quot_r) > $signed({{(QUOT_W-OUT_W){SAT_MAX[OUT_W-1]}}, SAT_MAX}))
+        if (s6_shifted_c > $signed({{(SCALED_W-OUT_W){SAT_MAX[OUT_W-1]}}, SAT_MAX}))
             s6_audio_c = SAT_MAX;
-        else if ($signed(s5_quot_r) < $signed({{(QUOT_W-OUT_W){SAT_MIN[OUT_W-1]}}, SAT_MIN}))
+        else if (s6_shifted_c < $signed({{(SCALED_W-OUT_W){SAT_MIN[OUT_W-1]}}, SAT_MIN}))
             s6_audio_c = SAT_MIN;
         else
-            s6_audio_c = s5_quot_r[OUT_W-1:0];
+            s6_audio_c = s6_shifted_c[OUT_W-1:0];
     end
 
     // --------------------------------------------------------
-    // Sequential pipeline registers
+    // Sequential registers
     // --------------------------------------------------------
-    always_ff @(posedge clk or negedge n_rst) begin
-        if (!n_rst) begin
-            prev_i_r   <= '0;
-            prev_q_r   <= '0;
+    always_ff @(posedge clk, negedge n_rst) begin
+        if (~n_rst) begin
+            prev_i_r <= '0;
+            prev_q_r <= '0;
 
-            s1_valid_r <= '0; s1_i_r  <= '0; s1_q_r  <= '0;
-            s1_dI_r    <= '0; s1_dQ_r <= '0;
+            s1_valid_r <= 1'b0;
+            s1_cross_r <= '0;
+            s1_dot_r   <= '0;
 
-            s2_valid_r <= '0; s2_num_r <= '0; s2_den_r <= '0;
-            s3_valid_r <= '0; s3_num_r <= '0; s3_den_r <= '0;
-            s4_valid_r <= '0; s4_snum_r <= '0; s4_den_r <= '0;
-            s5_valid_r <= '0; s5_quot_r <= '0;
+            s2_valid_r <= 1'b0;
+            s2_cross_r <= '0;
+            s2_dot_r   <= '0;
+
+            s_scaled_valid_r <= 1'b0;
+            s_scaled_r       <= '0;
 
             fdif.o_valid <= 1'b0;
             fdif.o_audio <= '0;
         end else begin
-            // Stage 0: latch prev samples only on valid input
+            // Stage 0
             if (fdif.i_valid) begin
                 prev_i_r <= fdif.i_i;
                 prev_q_r <= fdif.i_q;
@@ -576,31 +819,19 @@ module fm_demodulate #(
 
             // Stage 1
             s1_valid_r <= s1_valid_c;
-            s1_i_r     <= s1_i_c;
-            s1_q_r     <= s1_q_c;
-            s1_dI_r    <= s1_dI_c;
-            s1_dQ_r    <= s1_dQ_c;
+            s1_cross_r <= s1_cross_c;
+            s1_dot_r   <= s1_dot_c;
 
             // Stage 2
             s2_valid_r <= s2_valid_c;
-            s2_num_r   <= s2_num_c;
-            s2_den_r   <= s2_den_c;
+            s2_cross_r <= s2_cross_c;
+            s2_dot_r   <= s2_dot_c;
 
-            // Stage 3
-            s3_valid_r <= s3_valid_c;
-            s3_num_r   <= s3_num_c;
-            s3_den_r   <= s3_den_c;
+            // Stage N_ITER+3
+            s_scaled_valid_r <= s_scaled_valid_c;
+            s_scaled_r       <= s_scaled_c;
 
-            // Stage 4
-            s4_valid_r <= s4_valid_c;
-            s4_snum_r  <= s4_snum_c;
-            s4_den_r   <= s4_den_c;
-
-            // Stage 5
-            s5_valid_r <= s5_valid_c;
-            s5_quot_r  <= s5_quot_c;
-
-            // Stage 6 → output
+            // Stage N_ITER+4 → output
             fdif.o_valid <= s6_valid_c;
             fdif.o_audio <= s6_audio_c;
         end
