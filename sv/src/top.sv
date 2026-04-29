@@ -83,6 +83,9 @@ import types::*;
     assign bt_sck = i2sif.i2s_bclk;
     assign bt_sd  = i2sif.i2s_sd;
 
+    // Decimation
+    
+
     // ---- Modules ----
     // RF Front End
     rf_cdc u_rf_cdc (.fpga_clk(fpga_clk), .n_rst(n_rst), .rfif(rfif));
