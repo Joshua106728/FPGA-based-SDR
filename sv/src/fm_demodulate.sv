@@ -354,8 +354,7 @@
 // endmodule
 
 `timescale 1ns / 1ps
-`include "fm_demodulate_if.vh"
-
+`include "../include/fm_demodulate_if.vh"
 // ============================================================
 // fm_demodulate.sv
 // ============================================================

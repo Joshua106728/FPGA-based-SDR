@@ -38,6 +38,29 @@ generate_target all [get_ips low_pass_filter]
 ##################################################################
 
 ##################################################################
+# CREATE IP div
+##################################################################
+
+set div [create_ip -name div_gen -vendor xilinx.com -library ip -version 5.1 -module_name div]
+
+# User Parameters
+set_property -dict [list \
+  CONFIG.ARESETN {true} \
+  CONFIG.dividend_and_quotient_width {29} \
+  CONFIG.divisor_width {18} \
+  CONFIG.fractional_width {18} \
+  CONFIG.latency {33} \
+] [get_ips div]
+
+# Runtime Parameters
+set_property -dict { 
+  GENERATE_SYNTH_CHECKPOINT {1}
+} $div
+
+generate_target all [get_ips div]
+##################################################################
+
+##################################################################
 # INCLUDE DIRECTORY
 ##################################################################
 set include_path [file normalize "./include"]

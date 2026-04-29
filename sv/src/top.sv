@@ -71,13 +71,13 @@ import types::*;
     // Stage 5: Decimation (220500 → 36750 Hz)
     // FM demod outputs mono audio — feed into decimation audio_in
     decimation_if decimif();
-    assign decimif.audio_in       = fdif.o_audio;
-    assign decimif.audio_in_valid = fdif.o_valid;
+    assign decimif.demod_sample       = fdif.o_audio;
+    assign decimif.demod_valid = fdif.o_valid;
 
     // Stage 6: De-emphasis
     de_emphasis_if deif();
-    assign deif.audio_in    = decimif.audio_out;
-    assign deif.audio_valid = decimif.audio_out_valid;
+    assign deif.audio_in    = decimif.decim_sample;
+    assign deif.audio_valid = decimif.decim_valid;
 
     // Stage 7: I2S TX
     i2s_if i2sif();

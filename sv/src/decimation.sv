@@ -17,13 +17,13 @@ import types::*;
 
     // only pass every Nth valid sample
     logic keep;
-    assign keep = decimif.lpf_valid && (count == 3'd0);
+    assign keep = decimif.demod_valid && (count == 3'd0);
 
     // next count: increment on valid, wrap at DECIM_FACTOR
     always_comb begin
         next_count = count;
 
-        if (decimif.lpf_valid) begin
+        if (decimif.demod_valid) begin
             if (count == DECIM_FACTOR - 1)
                 next_count = 3'd0;
             else
@@ -42,16 +42,14 @@ import types::*;
     // output logic: latch only when we keep the sample
     always_ff @(posedge clk, negedge n_rst) begin
         if (!n_rst) begin
-            decimif.decim_i     <= '0;
-            decimif.decim_q     <= '0;
+            decimif.decim_sample <= '0;
             decimif.decim_valid <= 1'b0;
         end else begin
             decimif.decim_valid <= keep;
 
             if (keep) begin
                 // drop 2 LSBs → 18b to 16b
-                decimif.decim_i <= decimif.lpf_i[DATA_DW-1 -: 16];
-                decimif.decim_q <= decimif.lpf_q[DATA_DW-1 -: 16];
+                decimif.decim_sample <= decimif.demod_sample[DATA_DW-1 -: 16];
             end
         end
     end

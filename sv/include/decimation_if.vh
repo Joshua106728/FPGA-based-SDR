@@ -9,21 +9,21 @@ import types::*;
 interface decimation_if;
 
     // INPUT — from lpf_wrapper (18-bit DATA_DW)
-    logic signed [DATA_DW-1:0] lpf_i, lpf_q;
-    logic lpf_valid;
+    logic signed [DATA_DW-1:0] demod_sample;
+    logic demod_valid;
 
     // OUTPUT — to fm_demodulate (16-bit to match fm_demodulate_if)
-    logic signed [15:0] decim_i, decim_q;
+    logic signed [15:0] decim_sample;
     logic decim_valid;
 
     modport decimation_inst (
-        input  lpf_i, lpf_q, lpf_valid,
-        output decim_i, decim_q, decim_valid
+        input  demod_sample, demod_valid,
+        output decim_sample, decim_valid
     );
 
     modport decimation_tb (
-        input  decim_i, decim_q, decim_valid,
-        output lpf_i, lpf_q, lpf_valid
+        input  decim_sample, decim_valid,
+        output demod_sample, demod_valid
     );
 
 endinterface
