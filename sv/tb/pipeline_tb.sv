@@ -1,0 +1,169 @@
+`timescale 1ns / 1ps
+`include "../include/types.sv"
+`include "../include/dc_offset_if.vh"
+`include "../include/lpf_wrapper_if.vh"
+`include "../include/decimation_if.vh"
+`include "../include/fm_demodulate_if.vh"
+`include "../include/de_emphasis_if.vh"
+
+// ============================================================
+// pipeline_tb.sv
+// ============================================================
+// Drives the DSP pipeline (dc_offset → lpf_wrapper → decimation
+// → fm_demodulate → de_emphasis) with real I/Q samples loaded
+// from iq_samples.hex, then writes output to rtl_output.txt
+// for comparison against Python golden reference.
+//
+// rf_cdc and i2s_master_tx are excluded:
+//   - rf_cdc is a CDC module tested separately
+//   - i2s_master_tx is output-only and doesn't affect DSP math
+//
+// How to use:
+//   1. Run csv_to_hex.py to generate iq_samples.hex
+//   2. Copy iq_samples.hex into sv/
+//   3. Run this testbench in Vivado sim
+//   4. Collect rtl_output.txt and rtl_demod_output.txt
+//   5. Run compare_outputs.py to compare against Python golden
+//
+// Sample injection:
+//   Each entry in iq_samples.hex is 16 bits: [15:8]=I, [7:0]=Q
+//   We inject one sample per SDR_PERIOD clock cycles to simulate
+//   the rate at which rf_cdc would deliver samples.
+// ============================================================
+
+module pipeline_tb;
+    import types::*;
+
+    // ---- Clock and reset ----
+    localparam CLK_PERIOD  = 10;   // 10ns = 100 MHz FPGA clock
+    // SDR sample rate = 220500 Hz → one sample every ~453 clocks at 100MHz
+    localparam SDR_PERIOD  = 453;
+    localparam NUM_SAMPLES = 5000; // must match number of lines in iq_samples.hex
+
+    logic clk, n_rst;
+
+    initial clk = 0;
+    always #(CLK_PERIOD/2) clk = ~clk;
+
+    // ---- Interface instantiations ----
+    dc_offset_if    dcif();
+    lpf_wrapper_if  lpfif();
+    decimation_if   decimif();
+    fm_demodulate_if fdif();
+    de_emphasis_if  deif();
+
+    // ---- Wire interfaces together ----
+    assign lpfif.corr_i     = dcif.corr_i;
+    assign lpfif.corr_q     = dcif.corr_q;
+    assign lpfif.corr_valid = dcif.corr_valid;
+
+    assign decimif.lpf_i    = lpfif.lpf_i;
+    assign decimif.lpf_q    = lpfif.lpf_q;
+    assign decimif.lpf_valid = lpfif.lpf_valid;
+
+    assign fdif.i_i         = decimif.decim_i;
+    assign fdif.i_q         = decimif.decim_q;
+    assign fdif.i_valid     = decimif.decim_valid;
+
+    assign deif.audio_in    = fdif.o_audio;
+    assign deif.audio_valid = fdif.o_valid;
+
+    // ---- Module instantiations ----
+    dc_offset u_dc_offset (
+        .clk(clk), .n_rst(n_rst), .dcif(dcif)
+    );
+
+    lpf_wrapper u_lpf_wrapper (
+        .clk(clk), .n_rst(n_rst), .lpfif(lpfif)
+    );
+
+    decimation #(.DECIM_FACTOR(6)) u_decimation (
+        .clk(clk), .n_rst(n_rst), .decimif(decimif)
+    );
+
+    fm_demodulate u_fm_demodulate (
+        .clk(clk), .n_rst(n_rst), .fdif(fdif)
+    );
+
+    de_emphasis u_de_emphasis (
+        .clk(clk), .n_rst(n_rst), .deif(deif)
+    );
+
+    // ---- Load I/Q hex samples ----
+    // Each entry: [15:8] = I, [7:0] = Q (packed by csv_to_hex.py)
+    logic [15:0] iq_mem [0:NUM_SAMPLES-1];
+    initial $readmemh("iq_samples.hex", iq_mem);
+
+    // ---- Output file handles ----
+    integer rtl_out_file;
+    integer rtl_demod_file;
+
+    // ---- Stimulus: inject one sample per SDR_PERIOD clocks ----
+    integer sample_idx;
+    integer clk_count;
+
+    initial begin : stimulus
+        // Open output files
+        rtl_out_file   = $fopen("rtl_output.txt",       "w");
+        rtl_demod_file = $fopen("rtl_demod_output.txt", "w");
+
+        if (rtl_out_file == 0)
+            $fatal(1, "Could not open rtl_output.txt");
+        if (rtl_demod_file == 0)
+            $fatal(1, "Could not open rtl_demod_output.txt");
+
+        // Reset
+        n_rst           <= 1'b0;
+        dcif.sample_i   <= '0;
+        dcif.sample_q   <= '0;
+        dcif.sample_valid <= 1'b0;
+
+        repeat(10) @(posedge clk);
+        n_rst <= 1'b1;
+        repeat(5)  @(posedge clk);
+
+        // Inject samples one at a time at SDR rate
+        for (sample_idx = 0; sample_idx < NUM_SAMPLES; sample_idx++) begin
+            @(posedge clk);
+            dcif.sample_i     <= iq_mem[sample_idx][15:8];
+            dcif.sample_q     <= iq_mem[sample_idx][7:0];
+            dcif.sample_valid <= 1'b1;
+
+            @(posedge clk);
+            dcif.sample_valid <= 1'b0;
+
+            // Wait for next SDR sample time
+            repeat(SDR_PERIOD - 2) @(posedge clk);
+        end
+
+        // Let pipeline drain (enough cycles for all pipeline stages to flush)
+        repeat(SDR_PERIOD * 10) @(posedge clk);
+
+        $fclose(rtl_out_file);
+        $fclose(rtl_demod_file);
+        $display("[TB] Simulation complete. Check rtl_output.txt and rtl_demod_output.txt");
+        $finish;
+    end
+
+    // ---- Capture de-emphasis output ----
+    always_ff @(posedge clk) begin : captureDeemph
+        if (deif.audio_out_valid) begin
+            // Write signed 18-bit value as decimal integer
+            $fdisplay(rtl_out_file, "%0d", $signed(deif.audio_out));
+        end
+    end
+
+    // ---- Capture fm_demodulate output (for per-stage debug) ----
+    always_ff @(posedge clk) begin : captureDemod
+        if (fdif.o_valid) begin
+            $fdisplay(rtl_demod_file, "%0d", $signed(fdif.o_audio));
+        end
+    end
+
+    // ---- Timeout watchdog ----
+    initial begin : watchdog
+        #(CLK_PERIOD * SDR_PERIOD * (NUM_SAMPLES + 100));
+        $fatal(1, "[TB] Watchdog timeout — simulation took too long");
+    end
+
+endmodule
