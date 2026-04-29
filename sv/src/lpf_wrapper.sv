@@ -29,7 +29,7 @@ import types::*;
     );
 
     low_pass_filter lpf_q (
-        .aresetn(n_rst),                    // input wire aresetn
+        .s_axis_aresetn(n_rst),             // input wire aresetn
         .aclk(clk),                         // input wire aclk
         .s_axis_data_tvalid(q_valid),       // input wire s_axis_data_tvalid
         .s_axis_data_tready(q_ready),       // output wire s_axis_data_tready
