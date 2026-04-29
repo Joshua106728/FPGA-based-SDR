@@ -12,7 +12,7 @@
 //   lpf_wrapper → [decimation] → fm_demodulate
 //
 // The lpf_wrapper has already removed all energy above the audio
-// bandwidth, so simply dropping 4 out of 5 samples is safe —
+// bandwidth, so simply dropping 5 out of 6 samples is safe —
 // no aliasing will occur.
 //
 // Python equivalent:
@@ -24,12 +24,16 @@
 //   Input  — 18-bit signed (DATA_DW) from lpf_wrapper
 //   Output — 16-bit signed to match fm_demodulate_if (i_i, i_q)
 //   Truncation drops the 2 LSBs (least significant fractional bits)
+//
+// Counter width:
+//   DECIM_FACTOR = 6, so counter runs 0..5 → 3 bits wide
+//   Hardcoded as [2:0] to avoid $clog2
 // ============================================================
 
 module decimation
 import types::*;
 #(
-    parameter int DECIM_FACTOR = 5  // SDR_RATE / AUDIO_RATE = 220500 / 44100 = 5
+    parameter int DECIM_FACTOR = 6  // 220500 / 36750 = 6
 )(
     input  logic clk,
     input  logic n_rst,
@@ -37,28 +41,28 @@ import types::*;
 );
 
     // --------------------------------------------------------
-    // Counter: tracks position within each decimation window
-    // Counts valid input samples 0 → DECIM_FACTOR-1, then wraps
+    // Counter: 3 bits wide to hold values 0..5
+    // Counts valid input samples, wraps at DECIM_FACTOR
     // --------------------------------------------------------
-    logic [$clog2(DECIM_FACTOR)-1:0] count, next_count;
+    logic [2:0] count, next_count;
 
     // keep pulses high on the sample we want to pass through
     logic keep;
-    assign keep = decimif.lpf_valid && (count == '0);
+    assign keep = decimif.lpf_valid && (count == 3'd0);
 
     always_comb begin : counterNext
         next_count = count;
         if (decimif.lpf_valid) begin
             if (count == DECIM_FACTOR - 1)
-                next_count = '0;
+                next_count = 3'd0;
             else
-                next_count = count + 1'b1;
+                next_count = count + 3'd1;
         end
     end
 
     always_ff @(posedge clk, negedge n_rst) begin : counterReg
         if (~n_rst)
-            count <= '0;
+            count <= 3'd0;
         else
             count <= next_count;
     end
