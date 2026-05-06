@@ -8,12 +8,12 @@ import types::*;
 
 interface de_emphasis_if;
 
-    // INPUT — from fm_demodulate (16-bit audio, matches fm_demodulate_if o_audio)
-    logic signed [15:0] audio_in;
+    // INPUT — from decimation (18-bit audio)
+    logic signed [DATA_DW-1:0] audio_in;
     logic audio_valid;
 
-    // OUTPUT — to i2s_master_tx (18-bit to match i2s_if sample_q18)
-    logic signed [PCM_IN_W-1:0] audio_out;
+    // OUTPUT — to i2s_master_tx (18-bit)
+    logic signed [DATA_DW-1:0] audio_out;
     logic audio_out_valid;
 
     modport de_emphasis_inst (

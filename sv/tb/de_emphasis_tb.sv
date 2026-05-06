@@ -10,7 +10,7 @@
 //   Test 2 — IIR math correctness (sample-by-sample comparison)
 //   Test 3 — Valid gating (output frozen when valid=0)
 //   Test 4 — DC convergence (unity DC gain check)
-//   Test 5 — Sign extension (16-bit → 18-bit)
+//   Test 5 — Negative 18-bit output (sign bit propagates correctly)
 // ============================================================
 
 module de_emphasis_tb;
@@ -33,16 +33,17 @@ module de_emphasis_tb;
     localparam int ALPHA_FP        = 65518;
     localparam int ONE_MINUS_ALPHA = 18;
 
-    // Software model of the IIR — mirrors RTL arithmetic exactly
-    // acc = ALPHA*y_prev + (1-ALPHA)*x, then arithmetic shift right 16
-    function automatic logic signed [15:0] iir_step(
-        input logic signed [15:0] x,
-        input logic signed [15:0] y_prev_in
+    // Software model of the IIR — mirrors RTL arithmetic exactly.
+    // 18-bit I/O, 36-bit accumulator, extract bits [33:16] to drop
+    // the 16 Q0.16 fractional bits.
+    function automatic logic signed [DATA_DW-1:0] iir_step(
+        input logic signed [DATA_DW-1:0] x,
+        input logic signed [DATA_DW-1:0] y_prev_in
     );
-        logic signed [32:0] acc;
-        acc = ($signed(33'(ALPHA_FP))        * $signed(33'(y_prev_in)))
-            + ($signed(33'(ONE_MINUS_ALPHA)) * $signed(33'(x)));
-        return acc[31:16];
+        logic signed [35:0] acc;
+        acc = ($signed({1'b0, 16'(ALPHA_FP)})        * $signed(y_prev_in))
+            + ($signed({1'b0, 16'(ONE_MINUS_ALPHA)}) * $signed(x));
+        return acc[33:16];
     endfunction
 
     int pass_count = 0;
@@ -55,13 +56,10 @@ module de_emphasis_tb;
     //              audio_out_valid goes high here
     //   cycle N+2: sample outputs
     task automatic apply_and_check(
-        input logic signed [15:0] audio_in,
-        input logic signed [15:0] expected_16,
-        input string              label
+        input logic signed [DATA_DW-1:0] audio_in,
+        input logic signed [DATA_DW-1:0] expected,
+        input string                      label
     );
-        logic signed [PCM_IN_W-1:0] expected_18;
-        expected_18 = {{(PCM_IN_W-16){expected_16[15]}}, expected_16};
-
         // Cycle N: drive input
         @(posedge clk);
         deif.audio_in    <= audio_in;
@@ -77,10 +75,10 @@ module de_emphasis_tb;
         if (!deif.audio_out_valid) begin
             $display("FAIL [%s] audio_out_valid not asserted", label);
             fail_count++;
-        end else if (deif.audio_out !== expected_18) begin
+        end else if (deif.audio_out !== expected) begin
             $display("FAIL [%s] in=%0d expected=%0d got=%0d",
                 label, $signed(audio_in),
-                $signed(expected_18), $signed(deif.audio_out));
+                $signed(expected), $signed(deif.audio_out));
             fail_count++;
         end else begin
             $display("PASS [%s] in=%0d out=%0d",
@@ -112,7 +110,7 @@ module de_emphasis_tb;
 
         // Drive a large sample to get non-zero state
         @(posedge clk);
-        deif.audio_in    <= 16'sd32767;
+        deif.audio_in    <= 18'sd32767;
         deif.audio_valid <= 1'b1;
         @(posedge clk);
         deif.audio_valid <= 1'b0;
@@ -146,41 +144,36 @@ module de_emphasis_tb;
         // Verify state reset: first sample after reset should match
         // iir_step(x, y_prev=0), not carry over previous state
         begin
-            logic signed [15:0] exp;
-            exp = iir_step(16'sd32767, 16'sd0);
-            apply_and_check(16'sd32767, exp, "Reset state cleared");
+            logic signed [DATA_DW-1:0] exp;
+            exp = iir_step(18'sd32767, 18'sd0);
+            apply_and_check(18'sd32767, exp, "Reset state cleared");
         end
 
         // ============================================================
         // TEST 2 — IIR math correctness
-        // Use large inputs so products are non-trivially non-zero
-        // Expected values pre-computed by Python model (see comments)
+        // Use large inputs so products are non-trivially non-zero.
+        // Expected values computed by the software model above.
         // ============================================================
         $display("\n--- Test 2: IIR math correctness ---");
 
         do_reset();
 
         begin
-            // Input sequence chosen to give visible non-zero outputs:
-            //   x=32767:  18*32767>>16 = 8   (y_prev=0)
-            //   x=32767:  ALPHA*8 + 18*32767 = 8+8 = 16  >> trimmed
-            //   etc.
-            // Pre-verified by Python simulation
-            logic signed [15:0] inputs [0:7];
-            logic signed [15:0] y_sw;
-            logic signed [15:0] exp;
+            logic signed [DATA_DW-1:0] inputs [0:7];
+            logic signed [DATA_DW-1:0] y_sw;
+            logic signed [DATA_DW-1:0] exp;
             string lbl;
 
-            inputs[0] =  16'sd32767;
-            inputs[1] =  16'sd32767;
-            inputs[2] =  16'sd32767;
-            inputs[3] = -16'sd32768;
-            inputs[4] = -16'sd32768;
-            inputs[5] =  16'sd20000;
-            inputs[6] = -16'sd20000;
-            inputs[7] =  16'sd0;
+            inputs[0] =  18'sd32767;
+            inputs[1] =  18'sd32767;
+            inputs[2] =  18'sd32767;
+            inputs[3] = -18'sd32768;
+            inputs[4] = -18'sd32768;
+            inputs[5] =  18'sd20000;
+            inputs[6] = -18'sd20000;
+            inputs[7] =  18'sd0;
 
-            y_sw = 16'sd0;
+            y_sw = 18'sd0;
 
             for (int i = 0; i < 8; i++) begin
                 exp  = iir_step(inputs[i], y_sw);
@@ -199,11 +192,11 @@ module de_emphasis_tb;
         do_reset();
 
         begin
-            logic signed [PCM_IN_W-1:0] out_before;
+            logic signed [DATA_DW-1:0] out_before;
 
             // Prime with one sample to get non-zero output
             @(posedge clk);
-            deif.audio_in    <= 16'sd32767;
+            deif.audio_in    <= 18'sd32767;
             deif.audio_valid <= 1'b1;
             @(posedge clk);
             deif.audio_valid <= 1'b0;
@@ -212,7 +205,7 @@ module de_emphasis_tb;
             out_before = deif.audio_out;
 
             // Hold valid low for 5 cycles while changing audio_in
-            deif.audio_in <= 16'sd32767;
+            deif.audio_in <= 18'sd32767;
             repeat(5) @(posedge clk);
 
             if (deif.audio_out !== out_before) begin
@@ -236,27 +229,24 @@ module de_emphasis_tb;
 
         // ============================================================
         // TEST 4 — DC convergence
-        // After many identical samples, output → input (unity DC gain)
-        // With ALPHA=65518 (≈0.9997), time constant ≈ 3333 samples.
-        // After 10000 samples the error should be < 2 LSBs.
+        // After many identical samples, output → steady state.
+        // With truncating integer arithmetic the IIR converges to
+        // floor(ONE_MINUS_ALPHA * dc_in / ONE_MINUS_ALPHA) not dc_in.
+        // We find the true converged value from the software model
+        // and compare against that within ±1 LSB.
         // ============================================================
         $display("\n--- Test 4: DC convergence ---");
 
         do_reset();
 
         begin
-            logic signed [15:0] dc_in;
-            logic signed [15:0] y_sw;
-            logic signed [15:0] y_prev_sw;
+            logic signed [DATA_DW-1:0] dc_in;
+            logic signed [DATA_DW-1:0] y_sw;
+            logic signed [DATA_DW-1:0] y_prev_sw;
 
-            dc_in = 16'sd10000;
-            y_sw  = 16'sd0;
+            dc_in = 18'sd10000;
+            y_sw  = 18'sd0;
 
-            // Run software model to true convergence (when y stops changing).
-            // With truncating integer arithmetic the IIR does NOT converge to
-            // dc_in — it converges to floor((ONE_MINUS_ALPHA * dc_in) / 18)
-            // which for dc_in=10000 is 6360, not 10000.
-            // We find the true converged value here and compare against that.
             for (int k = 0; k < 1_000_000; k++) begin
                 y_prev_sw = y_sw;
                 y_sw      = iir_step(dc_in, y_sw);
@@ -266,7 +256,6 @@ module de_emphasis_tb;
             $display("[DC converge] Software model converged to %0d (input=%0d)",
                 $signed(y_sw), $signed(dc_in));
 
-            // Drive same number of samples into DUT
             for (int k = 0; k < 10000; k++) begin
                 @(posedge clk);
                 deif.audio_in    <= dc_in;
@@ -277,39 +266,37 @@ module de_emphasis_tb;
 
             repeat(3) @(posedge clk);
 
-            // DUT output should match software model converged value ±1 LSB
-            if ($signed(deif.audio_out[15:0]) >= $signed(y_sw) - 1 &&
-                $signed(deif.audio_out[15:0]) <= $signed(y_sw) + 1) begin
+            if ($signed(deif.audio_out) >= $signed(y_sw) - 1 &&
+                $signed(deif.audio_out) <= $signed(y_sw) + 1) begin
                 $display("PASS [DC converge] DUT=%0d matches model=%0d (±1 LSB)",
-                    $signed(deif.audio_out[15:0]), $signed(y_sw));
+                    $signed(deif.audio_out), $signed(y_sw));
                 pass_count++;
             end else begin
                 $display("FAIL [DC converge] DUT=%0d, model=%0d",
-                    $signed(deif.audio_out[15:0]), $signed(y_sw));
+                    $signed(deif.audio_out), $signed(y_sw));
                 fail_count++;
             end
         end
 
         // ============================================================
-        // TEST 5 — Sign extension
-        // Negative 16-bit result must be correctly sign-extended to 18-bit
+        // TEST 5 — Negative 18-bit output
+        // Drive negative samples and verify the sign bit propagates
+        // correctly through the 18-bit accumulator and output register.
         // ============================================================
-        $display("\n--- Test 5: Sign extension ---");
+        $display("\n--- Test 5: Negative 18-bit output ---");
 
         do_reset();
 
         begin
-            // Run enough negative samples to get a clearly negative output
-            logic signed [15:0] exp_16;
-            logic signed [PCM_IN_W-1:0] exp_18;
-            logic signed [15:0] y_sw;
+            logic signed [DATA_DW-1:0] exp;
+            logic signed [DATA_DW-1:0] y_sw;
 
-            y_sw = 16'sd0;
+            y_sw = 18'sd0;
             for (int k = 0; k < 5; k++) begin
-                exp_16 = iir_step(-16'sd32768, y_sw);
-                y_sw   = exp_16;
+                exp  = iir_step(-18'sd32768, y_sw);
+                y_sw = exp;
                 @(posedge clk);
-                deif.audio_in    <= -16'sd32768;
+                deif.audio_in    <= -18'sd32768;
                 deif.audio_valid <= 1'b1;
                 @(posedge clk);
                 deif.audio_valid <= 1'b0;
@@ -317,17 +304,15 @@ module de_emphasis_tb;
 
             repeat(3) @(posedge clk);
 
-            // Check MSBs are sign-extended correctly
-            // If output is negative, bits [17:16] should both be 1
-            exp_18 = {{(PCM_IN_W-16){exp_16[15]}}, exp_16};
-
-            if (deif.audio_out !== exp_18) begin
-                $display("FAIL [Sign ext] expected 18-bit=%0d got=%0d",
-                    $signed(exp_18), $signed(deif.audio_out));
+            // Verify the full 18-bit signed output matches the model,
+            // including both sign bits [17:16] being set for negative values
+            if (deif.audio_out !== exp) begin
+                $display("FAIL [Neg 18-bit] expected=%0d got=%0d",
+                    $signed(exp), $signed(deif.audio_out));
                 fail_count++;
             end else begin
-                $display("PASS [Sign ext] 18-bit output=%0d correctly sign-extended",
-                    $signed(deif.audio_out));
+                $display("PASS [Neg 18-bit] output=%0d, sign bits[17:16]=%02b",
+                    $signed(deif.audio_out), deif.audio_out[17:16]);
                 pass_count++;
             end
         end

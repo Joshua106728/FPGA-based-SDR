@@ -46,10 +46,12 @@ set div [create_ip -name div_gen -vendor xilinx.com -library ip -version 5.1 -mo
 # User Parameters
 set_property -dict [list \
   CONFIG.ARESETN {true} \
-  CONFIG.dividend_and_quotient_width {29} \
-  CONFIG.divisor_width {18} \
-  CONFIG.fractional_width {18} \
-  CONFIG.latency {33} \
+  CONFIG.algorithm_type {High_Radix} \
+  CONFIG.dividend_and_quotient_width {32} \
+  CONFIG.divisor_width {24} \
+  CONFIG.fractional_width {0} \
+  CONFIG.latency {26} \
+  CONFIG.remainder_type {Fractional} \
 ] [get_ips div]
 
 # Runtime Parameters

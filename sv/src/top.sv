@@ -1,3 +1,4 @@
+
 `timescale 1ns / 10ps
 `include "../include/types.sv"
 `include "../include/rf_cdc_if.vh"
@@ -7,15 +8,6 @@
 `include "../include/decimation_if.vh"
 `include "../include/de_emphasis_if.vh"
 `include "../include/i2s_if.vh"
-
-// ============================================================
-// top.sv
-// ============================================================
-// Full pipeline (correct order):
-//   RF tuner → rf_cdc → dc_offset → lpf_wrapper
-//           → fm_demodulate → decimation → de_emphasis
-//           → i2s_master_tx → ESP32
-// ============================================================
 
 module top
 import types::*;
@@ -40,7 +32,6 @@ import types::*;
     output logic bt_sck,
     output logic bt_sd
 );
-
     // ---- Interface instantiations ----
 
     // Stage 1: RF CDC
@@ -62,17 +53,15 @@ import types::*;
     assign lpfif.corr_valid = dcif.corr_valid;
 
     // Stage 4: FM Demodulate
-    // Truncate 18-bit LPF output to 16-bit for fm_demodulate_if
     fm_demodulate_if fdif();
-    assign fdif.i_i     = lpfif.lpf_i[DATA_DW-1 -: 16];
-    assign fdif.i_q     = lpfif.lpf_q[DATA_DW-1 -: 16];
-    assign fdif.i_valid = lpfif.lpf_valid;
+    assign fdif.lpf_i     = lpfif.lpf_i;
+    assign fdif.lpf_q     = lpfif.lpf_q;
+    assign fdif.lpf_valid = lpfif.lpf_valid;
 
     // Stage 5: Decimation (220500 → 36750 Hz)
-    // FM demod outputs mono audio — feed into decimation audio_in
     decimation_if decimif();
-    assign decimif.demod_sample       = fdif.o_audio;
-    assign decimif.demod_valid = fdif.o_valid;
+    assign decimif.demod_sample = fdif.demod_sample;
+    assign decimif.demod_valid = fdif.demod_valid;
 
     // Stage 6: De-emphasis
     de_emphasis_if deif();
@@ -95,33 +84,12 @@ import types::*;
     assign led4 = 1'b1;
 
     // ---- Module instantiations ----
-
-    rf_cdc u_rf_cdc (
-        .fpga_clk(fpga_clk), .n_rst(n_rst), .rfif(rfif)
-    );
-
-    dc_offset u_dc_offset (
-        .clk(fpga_clk), .n_rst(n_rst), .dcif(dcif)
-    );
-
-    lpf_wrapper u_lpf_wrapper (
-        .clk(fpga_clk), .n_rst(n_rst), .lpfif(lpfif)
-    );
-
-    fm_demodulate u_fm_demodulate (
-        .clk(fpga_clk), .n_rst(n_rst), .fdif(fdif)
-    );
-
-    decimation u_decimation (
-        .clk(fpga_clk), .n_rst(n_rst), .decimif(decimif)
-    );
-
-    de_emphasis u_de_emphasis (
-        .clk(fpga_clk), .n_rst(n_rst), .deif(deif)
-    );
-
-    i2s_master_tx u_i2s_master_tx (
-        .clk(fpga_clk), .n_rst(n_rst), .i2sif(i2sif)
-    );
+    rf_cdc u_rf_cdc (.fpga_clk(fpga_clk), .n_rst(n_rst), .rfif(rfif));
+    dc_offset u_dc_offset (.clk(fpga_clk), .n_rst(n_rst), .dcif(dcif));
+    lpf_wrapper u_lpf_wrapper (.clk(fpga_clk), .n_rst(n_rst), .lpfif(lpfif));
+    fm_demodulate u_fm_demodulate (.fpga_clk(fpga_clk), .n_rst(n_rst), .fmif(fdif));
+    decimation u_decimation (.clk(fpga_clk), .n_rst(n_rst), .decimif(decimif));
+    de_emphasis u_de_emphasis (.clk(fpga_clk), .n_rst(n_rst), .deif(deif));
+    i2s_master_tx u_i2s_master_tx (.clk(fpga_clk), .n_rst(n_rst), .i2sif(i2sif));
 
 endmodule

@@ -9,17 +9,23 @@ import types::*;
 
 interface divwrapper_if;
 
-    logic dividend_valid, divisor_valid, out_valid;
-    logic [DATA_DW-1:0] dividend_data, divisor_data, out_data;
+    // inputs
+    logic dividend_valid, divisor_valid, 
+    logic [31:0] dividend_data;
+    logic [24:0] divisor_data;
+
+    // outputs
+    logic out_valid, div_ready1, div_ready2;
+    logic [DATA_DW-1:0] out_data;
 
     modport div (
         input dividend_valid, divisor_valid, dividend_data, divisor_data,
-        output out_valid, out_data
+        output out_valid, div_ready1, div_ready2, out_data
     );
 
     modport div_tb (
         output dividend_valid, divisor_valid, dividend_data, divisor_data,
-        input out_valid, out_data
+        input out_valid, div_ready1, div_ready2, out_data
     );
     
 endinterface
