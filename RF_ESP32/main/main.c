@@ -470,13 +470,13 @@ esp_err_t rtlsdr_init_tuner(usb_device_handle_t dev_hdl) {
     return err;
 }
 
-esp_err_t rtlsdr_tune_102_9mhz_mock(usb_device_handle_t dev_hdl) {
-    ESP_LOGI(TAG, "Tuning R820T2 to 102.9 MHz...");
+esp_err_t rtlsdr_tune_105_3mhz_mock(usb_device_handle_t dev_hdl) {
+    ESP_LOGI(TAG, "Tuning R820T2 to 105.3 MHz...");
 
     esp_err_t err = rtlsdr_set_i2c_repeater(dev_hdl, true);
     if (err != ESP_OK) return err;
 
-    // Write the new calculated PLL values for 102.9 MHz
+    // Write the new calculated PLL values for 105.3 MHz
     rtlsdr_i2c_write_reg(dev_hdl, 0x34, 0x1A, 0x76); // Integer part (118)
     rtlsdr_i2c_write_reg(dev_hdl, 0x34, 0x1B, 0x4C); // Fractional MSB
     rtlsdr_i2c_write_reg(dev_hdl, 0x34, 0x1C, 0xCD); // Fractional LSB
@@ -497,7 +497,7 @@ esp_err_t rtlsdr_tune_102_9mhz_mock(usb_device_handle_t dev_hdl) {
     // Verify Bit 6 (0x40) for PLL Lock
     if (lock_status & 0x40) {
         ESP_LOGI(TAG, "===========================================");
-        ESP_LOGI(TAG, "SUCCESS! Hardware PLL Locked to 102.9 MHz!");
+        ESP_LOGI(TAG, "SUCCESS! Hardware PLL Locked to 105.3 MHz!");
         ESP_LOGI(TAG, "===========================================");
     } else {
         ESP_LOGE(TAG, "PLL Failed to lock. Status: 0x%02X", lock_status);
@@ -710,7 +710,7 @@ static void sdr_control_task(void *arg) {
                 }
 
                 // --- NEW: Step 7 - Tuner PLL Lock Test ---
-                rtlsdr_tune_102_9mhz_mock(dev_hdl);
+                rtlsdr_tune_105_3mhz_mock(dev_hdl);
 
                 // --- NEW STEP: Step 8 - DDC IF Mix-down ---
                 rtlsdr_set_if_357mhz_mock(dev_hdl);
