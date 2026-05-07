@@ -83,11 +83,14 @@ import types::*;
     assign led3 = 1'b0;
     assign led4 = 1'b1;
 
+    // Debug Signals (ILA)
+    
+
     // ---- Module instantiations ----
     rf_cdc u_rf_cdc (.fpga_clk(fpga_clk), .n_rst(n_rst), .rfif(rfif));
     dc_offset u_dc_offset (.clk(fpga_clk), .n_rst(n_rst), .dcif(dcif));
     lpf_wrapper u_lpf_wrapper (.clk(fpga_clk), .n_rst(n_rst), .lpfif(lpfif));
-    fm_demodulate u_fm_demodulate (.fpga_clk(fpga_clk), .n_rst(n_rst), .fmif(fmif));
+    fm_demodulate u_fm_demodulate (.clk(fpga_clk), .n_rst(n_rst), .fmif(fmif));
     decim u_decimation (.clk(fpga_clk), .n_rst(n_rst), .decimif(decimif));
     de_emphasis u_de_emphasis (.clk(fpga_clk), .n_rst(n_rst), .deif(deif));
     i2s_master_tx u_i2s_master_tx (.clk(fpga_clk), .n_rst(n_rst), .i2sif(i2sif));
