@@ -1,3 +1,4 @@
+
 `timescale 1ns / 1ps
 `include "../include/types.sv"
 `include "../include/i2s_if.vh"
@@ -70,7 +71,7 @@ module i2s_master_tx #(
         end else if (FORCE_CONST_PCM) begin
             pcm16 <= CONST_PCM_VALUE;
         end else if (sample_tick && i2sif.sample_valid) begin
-            pcm16 <= i2sif.sample_q18 >>> (PCM_IN_W - WORD_BITS);
+            pcm16 <= i2sif.sample_q18[WORD_BITS-1:0];
         end
     end
 
