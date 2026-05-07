@@ -93,6 +93,8 @@ import types::*;
     fm_demodulate u_fm_demodulate (.clk(fpga_clk), .n_rst(n_rst), .fmif(fmif));
     decim u_decimation (.clk(fpga_clk), .n_rst(n_rst), .decimif(decimif));
     de_emphasis u_de_emphasis (.clk(fpga_clk), .n_rst(n_rst), .deif(deif));
-    i2s_master_tx u_i2s_master_tx (.clk(fpga_clk), .n_rst(n_rst), .i2sif(i2sif));
+    // Enable a deterministic test pattern on the I2S output for bring-up/debug.
+    // Set USE_TEST_PATTERN=0 to revert to streaming the DSP pipeline output.
+    i2s_master_tx #(.USE_TEST_PATTERN(1'b1)) u_i2s_master_tx (.clk(fpga_clk), .n_rst(n_rst), .i2sif(i2sif));
 
 endmodule
