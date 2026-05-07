@@ -4,9 +4,7 @@
 import types::*;
 
 module i2s_master_tx #(
-    parameter int WORD_BITS = types::PCM_W,
-    parameter bit FORCE_CONST_PCM = 1'b0,
-    parameter logic signed [WORD_BITS-1:0] CONST_PCM_VALUE = 16'sh1000
+    parameter int WORD_BITS = types::PCM_W
 )(
     input  logic clk,
     input  logic n_rst,
@@ -67,8 +65,6 @@ module i2s_master_tx #(
     always_ff @(posedge clk) begin
         if (~n_rst) begin
             pcm16 <= '0;
-        end else if (FORCE_CONST_PCM) begin
-            pcm16 <= CONST_PCM_VALUE;
         end else if (sample_tick && i2sif.sample_valid) begin
             pcm16 <= i2sif.sample_q18 >>> (PCM_IN_W - WORD_BITS);
         end
