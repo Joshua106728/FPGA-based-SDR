@@ -11,8 +11,8 @@ module top_tb;
     import types::*;
 
     localparam CLK_PERIOD  = 10;
-    localparam SDR_PERIOD  = 453;
-    localparam NUM_SAMPLES = 5000;
+    localparam SDR_PERIOD  = 50;
+    localparam NUM_SAMPLES = 1250000;
 
     logic clk, n_rst;
 

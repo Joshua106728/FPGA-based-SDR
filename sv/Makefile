@@ -19,7 +19,8 @@ clean:
 	xvhdl ./FPGA_SDR.gen/sources_1/ip/div/sim/div.vhd
 
 	copy .\FPGA_SDR.gen\sources_1\ip\low_pass_filter\low_pass_filter.mif .
-	xelab -debug typical -relax $*_tb -s $*_sim -L xil_defaultlib -L fir_compiler_v7_2_24 -L xbip_pipe_v3_0 -L xbip_utils_v3_0 -L axi_utils_v2_0
+#	xelab -debug typical -relax $*_tb -s $*_sim -L xil_defaultlib -L fir_compiler_v7_2_24 -L xbip_pipe_v3_0 -L xbip_utils_v3_0 -L axi_utils_v2_0
+	xelab -debug off -O3 -relax $*_tb -s $*_sim -L xil_defaultlib -L fir_compiler_v7_2_24 -L xbip_pipe_v3_0 -L xbip_utils_v3_0 -L axi_utils_v2_0
 	xsim $*_sim -gui -view ./waves/$*_sim.wcfg
 
 synth:
