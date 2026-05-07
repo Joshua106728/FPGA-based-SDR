@@ -18,7 +18,6 @@ module i2s_master_tx #(
     logic bclk_next;
     logic bclk_fall;
     logic in_right = 1'b0;
-    logic in_delay = 1'b1;
     logic [$clog2(WORD_BITS)-1:0] bit_index = '0;
     logic sample_tick;
     logic signed [WORD_BITS-1:0] pcm16 = '0;
@@ -36,7 +35,6 @@ module i2s_master_tx #(
             i2sif.i2s_ws <= 1'b0;
             i2sif.i2s_sd <= 1'b0;
             in_right <= 1'b0;
-            in_delay <= 1'b1;
             bit_index <= WORD_BITS - 1;
             sample_tick <= 1'b0;
         end else begin
@@ -46,25 +44,19 @@ module i2s_master_tx #(
             i2sif.i2s_bclk <= bclk_next;
 
             if (bclk_fall) begin
-                if (in_delay) begin
-                    // Philips I2S: one bit-clock delay after WS transition before MSB.
-                    in_delay <= 1'b0;
+                i2sif.i2s_sd <= pcm16[bit_index];
+
+                if (bit_index == 0) begin
+                    // WS transitions on LSB clock; MSB of next word appears one BCLK later (Philips I2S).
+                    in_right <= ~in_right;
+                    i2sif.i2s_ws <= ~in_right;
                     bit_index <= WORD_BITS - 1;
-                end else begin
-                    i2sif.i2s_sd <= pcm16[bit_index];
 
-                    if (bit_index == 0) begin
-                        // Toggle WS at word boundary; next BCLK is the MSB of the next word.
-                        in_right <= ~in_right;
-                        i2sif.i2s_ws <= ~in_right;
-                        in_delay <= 1'b1;
-
-                        if (in_right) begin
-                            sample_tick <= 1'b1;
-                        end
-                    end else begin
-                        bit_index <= bit_index - 1'b1;
+                    if (in_right) begin
+                        sample_tick <= 1'b1;
                     end
+                end else begin
+                    bit_index <= bit_index - 1'b1;
                 end
             end
         end
