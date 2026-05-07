@@ -6,7 +6,7 @@
 module fm_demodulate 
 import types::*;
 (
-    input logic fpga_clk, n_rst,
+    input logic clk, n_rst,
     fm_demodulate_if.fm_demodulate_inst fmif
 );
     // Internal Signals
@@ -21,7 +21,7 @@ import types::*;
     logic signed [31:0] div_result;
     logic signed [49:0] scaled_result;
 
-    always_ff @(posedge fpga_clk, negedge n_rst) begin : latchLPF
+    always_ff @(posedge clk, negedge n_rst) begin : latchLPF
         if (~n_rst) begin
             prev_i <= '0;
             prev_q <= '0;
@@ -62,7 +62,7 @@ import types::*;
     end
 
     div your_instance_name (
-        .aclk(fpga_clk),                    // input wire aclk
+        .aclk(clk),                         // input wire aclk
         .aresetn(n_rst),                    // input wire aresetn
         .s_axis_divisor_tvalid(div_val),    // input wire s_axis_divisor_tvalid
         .s_axis_divisor_tready(),           // output wire s_axis_divisor_tready

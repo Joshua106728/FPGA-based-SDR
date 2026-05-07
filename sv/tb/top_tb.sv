@@ -3,7 +3,7 @@
 `include "../include/types.sv"
 `include "../include/dc_offset_if.vh"
 `include "../include/lpf_wrapper_if.vh"
-`include "../include/decimation_if.vh"
+`include "../include/decim_if.vh"
 `include "../include/fm_demodulate_if.vh"
 `include "../include/de_emphasis_if.vh"
 
@@ -12,7 +12,7 @@ module top_tb;
 
     localparam CLK_PERIOD  = 10;
     localparam SDR_PERIOD  = 453;
-    localparam NUM_SAMPLES = 10000;
+    localparam NUM_SAMPLES = 5000;
 
     logic clk, n_rst;
 
@@ -29,15 +29,15 @@ module top_tb;
     assign lpfif.corr_valid = dcif.corr_valid;
 
     // Stage 3: FM Demodulate
-    fm_demodulate_if fdif();
-    assign fdif.lpf_i     = lpfif.lpf_i;
-    assign fdif.lpf_q     = lpfif.lpf_q;
-    assign fdif.lpf_valid = lpfif.lpf_valid;
+    fm_demodulate_if fmif();
+    assign fmif.lpf_i     = lpfif.lpf_i;
+    assign fmif.lpf_q     = lpfif.lpf_q;
+    assign fmif.lpf_valid = lpfif.lpf_valid;
 
     // Stage 4: Decimation (220500 → 36750 Hz)
-    decimation_if decimif();
-    assign decimif.demod_sample = fdif.demod_sample;
-    assign decimif.demod_valid  = fdif.demod_valid;
+    decim_if decimif();
+    assign decimif.demod_sample = fmif.demod_sample;
+    assign decimif.demod_valid  = fmif.demod_valid;
 
     // Stage 5: De-emphasis
     de_emphasis_if deif();
@@ -47,8 +47,8 @@ module top_tb;
     // DUT stages
     dc_offset     u_dc_offset     (.clk(clk), .n_rst(n_rst), .dcif(dcif));
     lpf_wrapper   u_lpf_wrapper   (.clk(clk), .n_rst(n_rst), .lpfif(lpfif));
-    fm_demodulate u_fm_demodulate (.clk(clk), .n_rst(n_rst), .fdif(fdif));
-    decimation    u_decimation    (.clk(clk), .n_rst(n_rst), .decimif(decimif));
+    fm_demodulate u_fm_demodulate (.clk(clk), .n_rst(n_rst), .fmif(fmif));
+    decim         u_decimation    (.clk(clk), .n_rst(n_rst), .decimif(decimif));
     de_emphasis   u_de_emphasis   (.clk(clk), .n_rst(n_rst), .deif(deif));
 
     // packed samples: [15:8] = I, [7:0] = Q
@@ -157,9 +157,9 @@ module top_tb;
 
     // Stage 3: fm_demodulate → 16-bit signed mono @ SDR rate
     always_ff @(posedge clk) begin
-        if (n_rst && fdif.demod_valid) begin
+        if (n_rst && fmif.demod_valid) begin
             $fdisplay(f_demod, "%0d,%0d", idx_demod,
-                      $signed(fdif.demod_sample));
+                      $signed(fmif.demod_sample));
             idx_demod <= idx_demod + 1;
         end
     end

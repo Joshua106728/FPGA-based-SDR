@@ -1,12 +1,12 @@
 `timescale 1ns/1ps
 
-`ifndef DECIMATION_IF
-`define DECIMATION_IF
+`ifndef DECIM_IF
+`define DECIM_IF
 
 `include "../include/types.sv"
 import types::*;
 
-interface decimation_if;
+interface decim_if;
 
     // INPUT — from demodulation (18-bit DATA_DW)
     logic signed [DATA_DW-1:0] demod_sample;
@@ -16,12 +16,12 @@ interface decimation_if;
     logic signed [DATA_DW-1:0] decim_sample;
     logic decim_valid;
 
-    modport decimation_inst (
+    modport decim_inst (
         input  demod_sample, demod_valid,
         output decim_sample, decim_valid
     );
 
-    modport decimation_tb (
+    modport decim_tb (
         input  decim_sample, decim_valid,
         output demod_sample, demod_valid
     );

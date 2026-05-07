@@ -1,14 +1,14 @@
 
 `timescale 1ns / 1ps
 `include "../include/types.sv"
-`include "../include/decimation_if.vh"
+`include "../include/decim_if.vh"
 
-module decimation
+module decim
 import types::*;
 (
     input logic clk,
     input logic n_rst,
-    decimation_if.decimation_inst decimif
+    decim_if.decim_inst decimif
 );
     // simple mod-N counter for decimation
     logic [2:0] count, next_count;

@@ -5,7 +5,7 @@
 `include "../include/dc_offset_if.vh"
 `include "../include/lpf_wrapper_if.vh"
 `include "../include/fm_demodulate_if.vh"
-`include "../include/decimation_if.vh"
+`include "../include/decim_if.vh"
 `include "../include/de_emphasis_if.vh"
 `include "../include/i2s_if.vh"
 
@@ -53,15 +53,15 @@ import types::*;
     assign lpfif.corr_valid = dcif.corr_valid;
 
     // Stage 4: FM Demodulate
-    fm_demodulate_if fdif();
-    assign fdif.lpf_i     = lpfif.lpf_i;
-    assign fdif.lpf_q     = lpfif.lpf_q;
-    assign fdif.lpf_valid = lpfif.lpf_valid;
+    fm_demodulate_if fmif();
+    assign fmif.lpf_i     = lpfif.lpf_i;
+    assign fmif.lpf_q     = lpfif.lpf_q;
+    assign fmif.lpf_valid = lpfif.lpf_valid;
 
     // Stage 5: Decimation (220500 → 36750 Hz)
-    decimation_if decimif();
-    assign decimif.demod_sample = fdif.demod_sample;
-    assign decimif.demod_valid = fdif.demod_valid;
+    decim_if decimif();
+    assign decimif.demod_sample = fmif.demod_sample;
+    assign decimif.demod_valid = fmif.demod_valid;
 
     // Stage 6: De-emphasis
     de_emphasis_if deif();
@@ -87,8 +87,8 @@ import types::*;
     rf_cdc u_rf_cdc (.fpga_clk(fpga_clk), .n_rst(n_rst), .rfif(rfif));
     dc_offset u_dc_offset (.clk(fpga_clk), .n_rst(n_rst), .dcif(dcif));
     lpf_wrapper u_lpf_wrapper (.clk(fpga_clk), .n_rst(n_rst), .lpfif(lpfif));
-    fm_demodulate u_fm_demodulate (.fpga_clk(fpga_clk), .n_rst(n_rst), .fmif(fdif));
-    decimation u_decimation (.clk(fpga_clk), .n_rst(n_rst), .decimif(decimif));
+    fm_demodulate u_fm_demodulate (.fpga_clk(fpga_clk), .n_rst(n_rst), .fmif(fmif));
+    decim u_decimation (.clk(fpga_clk), .n_rst(n_rst), .decimif(decimif));
     de_emphasis u_de_emphasis (.clk(fpga_clk), .n_rst(n_rst), .deif(deif));
     i2s_master_tx u_i2s_master_tx (.clk(fpga_clk), .n_rst(n_rst), .i2sif(i2sif));
 
