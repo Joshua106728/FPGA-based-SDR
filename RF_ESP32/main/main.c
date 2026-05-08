@@ -526,14 +526,18 @@ esp_err_t rtlsdr_tune_105_3mhz_mock(usb_device_handle_t dev_hdl) {
     return ESP_OK;
 }
 
-// THIS IS FOR THE 3.57 MHz offset, not 357 MHZ
+// Mixes the 3.57 MHz IF down to ~50 kHz (not 0 Hz).
+// Leaving a 50 kHz residual keeps the FM carrier away from DC so that:
+//   1. The RTL2832U's internal DC correction loop (~19 Hz BW) doesn't kill the signal
+//   2. The FPGA's dc_offset module (~19 Hz BW) also leaves it untouched
+// NCO value: old 0x381121 scaled by (3520000/3570000) ≈ 0x374813
 esp_err_t rtlsdr_set_if_357mhz_mock(usb_device_handle_t dev_hdl) {
-    ESP_LOGI(TAG, "Configuring RTL2832U DDC for 3.57 MHz IF mix-down...");
+    ESP_LOGI(TAG, "Configuring RTL2832U DDC for 3.52 MHz mix-down (50 kHz offset)...");
 
-    // Write the pre-calculated 22-bit NCO value (0x381121) to Demodulator Page 1
-    rtlsdr_demod_write_reg(dev_hdl, 1, 0x19, 0x38); // High byte
-    rtlsdr_demod_write_reg(dev_hdl, 1, 0x1A, 0x11); // Middle byte
-    rtlsdr_demod_write_reg(dev_hdl, 1, 0x1B, 0x21); // Low byte
+    // 0x374813 mixes 3.57 MHz IF to ~+50 kHz in baseband
+    rtlsdr_demod_write_reg(dev_hdl, 1, 0x19, 0x37); // High byte
+    rtlsdr_demod_write_reg(dev_hdl, 1, 0x1A, 0x48); // Middle byte
+    rtlsdr_demod_write_reg(dev_hdl, 1, 0x1B, 0x13); // Low byte
 
     // Verification Readback
     uint8_t r19 = 0, r1A = 0, r1B = 0;
@@ -543,16 +547,16 @@ esp_err_t rtlsdr_set_if_357mhz_mock(usb_device_handle_t dev_hdl) {
 
     // Reconstruct the 22-bit value
     uint32_t verified_nco = (r19 << 16) | (r1A << 8) | r1B;
-    verified_nco &= 0x3FFFFF; // Mask off any stray upper bits (22-bit mask)
+    verified_nco &= 0x3FFFFF;
 
     ESP_LOGI(TAG, "Verified NCO Readback: 0x%06lX", verified_nco);
 
-    if (verified_nco == 0x381121) {
+    if (verified_nco == 0x374813) {
         ESP_LOGI(TAG, "===========================================");
-        ESP_LOGI(TAG, "SUCCESS! IF Down-Converter Configured!");
+        ESP_LOGI(TAG, "SUCCESS! IF Down-Converter Configured (50 kHz offset)!");
         ESP_LOGI(TAG, "===========================================");
     } else {
-        ESP_LOGE(TAG, "NCO mismatch! Expected 0x381121, got 0x%06lX", verified_nco);
+        ESP_LOGE(TAG, "NCO mismatch! Expected 0x374813, got 0x%06lX", verified_nco);
         return ESP_FAIL;
     }
     return ESP_OK;
