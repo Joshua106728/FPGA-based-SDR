@@ -34,7 +34,7 @@ module top_tb;
     assign fmif.lpf_q     = lpfif.lpf_q;
     assign fmif.lpf_valid = lpfif.lpf_valid;
 
-    // Stage 4: Decimation (220500 → 36750 Hz)
+    // Stage 4: Decimation (220500 → 44100 Hz)
     decim_if decimif();
     assign decimif.demod_sample = fmif.demod_sample;
     assign decimif.demod_valid  = fmif.demod_valid;
@@ -63,7 +63,7 @@ module top_tb;
     integer f_dc, f_lpf, f_demod, f_decim, f_deemph;
 
     // Independent sample counters per stage — each stage has its own
-    // valid cadence (e.g. decimation only fires every 6th demod sample),
+    // valid cadence (e.g. decimation only fires every 5th demod sample),
     // so each gets its own Sample_Index starting at 0.
     integer idx_dc, idx_lpf, idx_demod, idx_decim, idx_deemph;
 

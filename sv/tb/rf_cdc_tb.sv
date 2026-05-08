@@ -6,9 +6,10 @@ import types::*;
 
 module rf_cdc_tb;
     // clock periods
-    parameter FPGA_PERIOD = 40; // 25 MHz
-    parameter WS_PERIOD = 4000; // 250kHz
-    parameter BIT_PERIOD = 250; // 4MHz
+    parameter FPGA_PERIOD = 40; // 25 MHz (TB fpga_clk; unrelated to ESP rate)
+    // Match RF_ESP32 I2S: SDR_IQ_RATE_AFTER_DECIM = 220500 Hz stereo IQ frames (882k USB / 4 FIR).
+    parameter WS_PERIOD = 4535; // ~220.5 kHz word-select period (ns)
+    parameter BIT_PERIOD = 283; // ~16 BCLK bits/frame -> ~3.53 MHz BCLK
 
     logic fpga_clk = 0;
     logic ws_clk = 0;

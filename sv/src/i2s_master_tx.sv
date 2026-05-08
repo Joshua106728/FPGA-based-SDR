@@ -62,19 +62,62 @@ module i2s_master_tx
         end
     end
 
-    // Latch every incoming DSP sample; load into pcm16 on each I2S frame tick.
-    // sample_valid (~41.7 kHz) and sample_tick (~44.1 kHz) are 1-cycle pulses that
-    // rarely coincide on the same clock, so AND-ing them would starve the TX.
-    logic signed [PCM_W-1:0] audio_latch = '0;
+    // DSP `sample_valid` is timed off the RF ESP32 I2S stream (via rf_cdc); `sample_tick`
+    // is timed off this FPGA's DDS BCLK. Same nominal 44.1 kHz, different timebases →
+    // beats, repeated/skipped samples, and pulsing static if we only latch into pcm16.
+    localparam int AFIFO_DEPTH = 16;
+    localparam int AFIFO_PTR_W = $clog2(AFIFO_DEPTH);
+
+    function automatic logic [AFIFO_PTR_W-1:0] afifo_inc(input logic [AFIFO_PTR_W-1:0] p);
+        return (p == AFIFO_DEPTH - 1) ? '0 : (p + 1'b1);
+    endfunction
+
+    logic signed [PCM_W-1:0] afifo_mem[AFIFO_DEPTH];
+    logic [AFIFO_PTR_W-1:0] afifo_wp, afifo_rp;
+    logic [$clog2(AFIFO_DEPTH + 1) - 1:0] afifo_cnt;
+
+    logic signed [PCM_W-1:0] afifo_din;
+    assign afifo_din = i2sif.sample_q18[PCM_IN_W-1:2];
 
     always_ff @(posedge clk) begin
-        if (~n_rst) audio_latch <= '0;
-        else if (i2sif.sample_valid) audio_latch <= i2sif.sample_q18[PCM_IN_W-1:2];
-    end
-
-    always_ff @(posedge clk) begin
-        if (~n_rst) pcm16 <= '0;
-        else if (sample_tick) pcm16 <= audio_latch;
+        if (~n_rst) begin
+            afifo_wp <= '0;
+            afifo_rp <= '0;
+            afifo_cnt <= '0;
+            pcm16 <= '0;
+        end else begin
+            case ({i2sif.sample_valid, sample_tick})
+                2'b00: ;
+                2'b10: begin
+                    if (afifo_cnt < AFIFO_DEPTH) begin
+                        afifo_mem[afifo_wp] <= afifo_din;
+                        afifo_wp <= afifo_inc(afifo_wp);
+                        afifo_cnt <= afifo_cnt + 1'b1;
+                    end else begin
+                        afifo_rp <= afifo_inc(afifo_rp);
+                        afifo_mem[afifo_wp] <= afifo_din;
+                        afifo_wp <= afifo_inc(afifo_wp);
+                    end
+                end
+                2'b01: begin
+                    if (afifo_cnt > 0) begin
+                        pcm16 <= afifo_mem[afifo_rp];
+                        afifo_rp <= afifo_inc(afifo_rp);
+                        afifo_cnt <= afifo_cnt - 1'b1;
+                    end
+                end
+                2'b11: begin
+                    if (afifo_cnt > 0) begin
+                        pcm16 <= afifo_mem[afifo_rp];
+                        afifo_mem[afifo_wp] <= afifo_din;
+                        afifo_rp <= afifo_inc(afifo_rp);
+                        afifo_wp <= afifo_inc(afifo_wp);
+                    end else begin
+                        pcm16 <= afifo_din;
+                    end
+                end
+            endcase
+        end
     end
 
 endmodule

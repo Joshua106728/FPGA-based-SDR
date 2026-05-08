@@ -58,7 +58,7 @@ import types::*;
     assign fmif.lpf_q     = lpfif.lpf_q;
     assign fmif.lpf_valid = lpfif.lpf_valid;
 
-    // Stage 5: Decimation (220500 → 36750 Hz)
+    // Stage 5: Decimation (220500 → 44100 Hz, DECIM_FACTOR=5)
     decim_if decimif();
     assign decimif.demod_sample = fmif.demod_sample;
     assign decimif.demod_valid = fmif.demod_valid;
