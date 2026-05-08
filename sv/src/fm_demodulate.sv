@@ -73,7 +73,7 @@ import types::*;
         .s_axis_dividend_tready(),          // output wire s_axis_dividend_tready
         .s_axis_dividend_tdata(num),        // input wire [31 : 0] s_axis_dividend_tdata
         .m_axis_dout_tvalid(div_done),      // output wire m_axis_dout_tvalid
-        .m_axis_dout_tdata(div_result)      // output wire [31 : 0] m_axis_dout_tdata
+        .m_axis_dout_tdata(div_result)      // output wire [55 : 0] m_axis_dout_tdata
     );
 
     always_comb begin : scaleOutput
