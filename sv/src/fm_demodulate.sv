@@ -78,7 +78,9 @@ import types::*;
 
     always_comb begin : scaleOutput
         if (div_done) begin
-            scaled_result = div_result * SCALE_OUT;
+            // scaled_result = div_result * SCALE_OUT;
+            // fmif.demod_sample = scaled_result[27:10];
+            scaled_result = div_result[55:24] * SCALE_OUT;
             fmif.demod_sample = scaled_result[27:10];
             fmif.demod_valid = 1'b1;
         end else begin
