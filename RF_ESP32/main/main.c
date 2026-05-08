@@ -1,1306 +1,513 @@
-#include <stdio.h>
+/*
+ * Minimal RTL2832 USB IQ -> ESP32 I2S (8-bit stereo) for FPGA rf_cdc.
+ * FPGA expects 220500 IQ pairs/s: 882 ksps USB / 4 naive decimation (see sv/types.sv).
+ */
 #include <string.h>
-#include <math.h>
+
+#include "esp_err.h"
+#include "esp_log.h"
+#include "driver/i2s_std.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
-#include "esp_log.h"
+#include "freertos/task.h"
 #include "usb/usb_host.h"
-#include "freertos/ringbuf.h"
-#include "esp_err.h"
-#include "driver/i2s_std.h"
-#include "esp_dsp.h"
 
-#define SDR_BULK_BUFFER_SIZE (16 * 512) 
-#define NUM_BULK_TRANSFERS 8  
+static const char *TAG = "sdr";
 
-// ############################################################################
-// ESP FIR FILTER SINCE WE ARE DOING DECIMATION GOING FROM 1 MSPS -> 250 KSPS #
-// ############################################################################
-// --- ESP-DSP FIR DECIMATION SETUP ---
-/*
- * ESP32-P4 dsps_fird_f32_arp4 assumes tap count N suits the vector kernel (use multiple of 4).
- * Pad symmetric 15-tap kernel with a trailing 0 coefficient → identical response, N=16.
- */
-#define FIR_TAPS 16
+#define SDR_BULK_BUFFER_SIZE (16 * 512)
+#define NUM_BULK_TRANSFERS 12
+
+/** USB IQ rate programmed into RTL2832 before decimation */
+#define SDR_USB_IQ_RATE_HZ 882000u
+
 #define DECIMATION_FACTOR 4
+#define IQ_RATE_TO_FPGA (SDR_USB_IQ_RATE_HZ / DECIMATION_FACTOR)
 
-/** RTL2832 USB IQ sample rate before ESP FIR decimation (Hz). */
-#define SDR_USB_IQ_RATE_HZ 1000000u
+_Static_assert(IQ_RATE_TO_FPGA == 220500,
+               "IQ_RATE_TO_FPGA must be 220500 for FPGA decim DECIM_FACTOR=5 -> 44.1 kHz audio");
 
-/** Effective IQ rate to FPGA after DECIMATION_FACTOR (Hz). */
-#define SDR_IQ_RATE_AFTER_DECIM (SDR_USB_IQ_RATE_HZ / DECIMATION_FACTOR)
+static i2s_chan_handle_t tx_handle;
 
-// CRITICAL: ALIGN EVERYTHING TO 16 BYTES FOR RISC-V VECTOR INSTRUCTIONS
-__attribute__((aligned(16))) static float fir_coeffs[FIR_TAPS] = {
-    -0.0101f, -0.0175f, -0.0039f,  0.0381f,  0.1042f,
-     0.1741f,  0.2227f,  0.2393f,  0.2227f,  0.1741f,
-     0.1042f,  0.0381f, -0.0039f, -0.0175f, -0.0101f,
-     0.0f
-};
+#define I2S_WS_GPIO 4
+#define I2S_BCK_GPIO 5
+#define I2S_DOUT_GPIO 6
 
-static fir_f32_t fir_state_i;
-static fir_f32_t fir_state_q;
-
-// CRITICAL: Pad the delay lines slightly to ensure the vector loop never over-reads
-__attribute__((aligned(16))) static float delay_line_i[FIR_TAPS + 4];
-__attribute__((aligned(16))) static float delay_line_q[FIR_TAPS + 4];
-
-// CRITICAL: Align the massive conversion arrays
-#define MAX_SAMPLES_PER_BUCKET (SDR_BULK_BUFFER_SIZE / 2)
-__attribute__((aligned(16))) static float input_i_f32[MAX_SAMPLES_PER_BUCKET];
-__attribute__((aligned(16))) static float input_q_f32[MAX_SAMPLES_PER_BUCKET];
-__attribute__((aligned(16))) static float output_i_f32[MAX_SAMPLES_PER_BUCKET / DECIMATION_FACTOR];
-__attribute__((aligned(16))) static float output_q_f32[MAX_SAMPLES_PER_BUCKET / DECIMATION_FACTOR];
-
-// ############################################################################
-// END FIR FILTER SINCE WE ARE DOING DECIMATION GOING FROM 1 MSPS -> 250 KSPS #
-// ############################################################################
-
-
-static const char *TAG = "RTL_SDR_I2S"; // This defines the name used in ESP_LOGI
-static i2s_chan_handle_t tx_handle;    // This holds the I2S hardware handle
-
-// #################################################################
-// I2S STUFF #######################################################
-// #################################################################
-// ==========================================
-#define I2S_WS_GPIO      4   // Word Select  (was 45 — strapping pin on ESP32-S3, limits output to ~1V)
-#define I2S_BCK_GPIO     5   // Bit Clock    (was 46 — strapping pin on ESP32-S3, limits output to ~1V)
-#define I2S_DOUT_GPIO    6   // Data Out
-
-/* Stereo IQ word rate to FPGA (must match USB rate / DECIMATION_FACTOR). */
-#define SDR_SAMPLE_RATE SDR_IQ_RATE_AFTER_DECIM
-
-void init_i2s_hardware(void)
+static void init_i2s(void)
 {
-    ESP_LOGI(TAG, "Initializing 8-Bit I2S Pipeline at %u Hz (stereo IQ)...", (unsigned)SDR_SAMPLE_RATE);
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_AUTO, I2S_ROLE_MASTER);
-    
-    // Using your exact DMA settings for stability
-    chan_cfg.dma_desc_num = 16;
-    chan_cfg.dma_frame_num = 1024; 
+    /* Deeper DMA smooths USB jitter vs steady I2S drain (same average rate, bursty bulk). */
+    chan_cfg.dma_desc_num = 24;
+    chan_cfg.dma_frame_num = 1024;
     ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, &tx_handle, NULL));
 
     i2s_std_config_t std_cfg = {
-        .clk_cfg  = I2S_STD_CLK_DEFAULT_CONFIG(SDR_SAMPLE_RATE),
+        .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(IQ_RATE_TO_FPGA),
         .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_8BIT, I2S_SLOT_MODE_STEREO),
-        .gpio_cfg = {
-            .mclk = I2S_GPIO_UNUSED, 
-            .bclk = I2S_BCK_GPIO,
-            .ws   = I2S_WS_GPIO,
-            .dout = I2S_DOUT_GPIO,
-            .din  = I2S_GPIO_UNUSED, 
-        },
+        .gpio_cfg =
+            {
+                .mclk = I2S_GPIO_UNUSED,
+                .bclk = I2S_BCK_GPIO,
+                .ws = I2S_WS_GPIO,
+                .dout = I2S_DOUT_GPIO,
+                .din = I2S_GPIO_UNUSED,
+            },
     };
     std_cfg.clk_cfg.clk_src = I2S_CLK_SRC_APLL;
     std_cfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_128;
-
     ESP_ERROR_CHECK(i2s_channel_init_std_mode(tx_handle, &std_cfg));
     ESP_ERROR_CHECK(i2s_channel_enable(tx_handle));
+
+    ESP_LOGI(TAG, "I2S 8-bit stereo @ %u Hz (IQ pairs/s)", (unsigned)IQ_RATE_TO_FPGA);
 }
 
-// #################################################################
-// END I2S STUFF ###################################################
-// #################################################################
-// ==========================================
-
-
-// #################################################################
-// USB STUFF #######################################################
-// #################################################################
-// ==========================================
-// Upgrade from 2 buckets to 4 buckets to absorb the data spikes
-    
 static usb_host_client_handle_t client_hdl;
-
-// Synchronization objects to safely pass data between USB callbacks and our code
 static QueueHandle_t sdr_queue;
+static QueueHandle_t bucket_queue;
 static SemaphoreHandle_t transfer_sem;
 
-// R820T2 initialization array (Registers 0x05 through 0x1F)
-// We keep this global so we can modify specific bits later (like changing frequencies)
-// Reg 0x0A (index 5): IF filter capacitor bank  — 0x40 = default wide
-// Reg 0x0B (index 6): IF filter bandwidth       — 0xD6 = ~3.5 MHz wide (librtlsdr default)
-//                                                  0xE4 = ~1.5 MHz (better SNR for 1 MSPS FM)
-// Narrowing the IF BW from 3.5 MHz to 1.5 MHz rejects adjacent channels & out-of-band noise
-// that would otherwise fold into our 1 MSPS ADC window.
 static uint8_t r82xx_shadow_regs[27] = {
-    0x83, 0x32, 0x75, 0xC0, 0x40, 0xE4, 0x6C, 0xF5, // 0x05 to 0x0C  (0x0B: 0xD6->0xE4 narrows IF BW)
-    0x63, 0x75, 0x68, 0x6C, 0x83, 0x80, 0x00, 0x0F, // 0x0D to 0x14
-    0x00, 0xC0, 0x30, 0x48, 0xCC, 0x60, 0x00, 0x54, // 0x15 to 0x1C
-    0xAE, 0x4A, 0xC0                                // 0x1D to 0x1F
-};
+    0x83, 0x32, 0x75, 0xC0, 0x40, 0xE4, 0x6C, 0xF5, 0x63, 0x75, 0x68, 0x6C, 0x83, 0x80, 0x00,
+    0x0F, 0x00, 0xC0, 0x30, 0x48, 0xCC, 0x60, 0x00, 0x54, 0xAE, 0x4A, 0xC0};
 
-// Callback triggered when a USB transfer completes
-static void transfer_cb(usb_transfer_t *transfer) {
-    xSemaphoreGive(transfer_sem); // Signal that the transfer is done
-}
+static void transfer_cb(usb_transfer_t *t) { xSemaphoreGive(transfer_sem); }
 
-// ---------------------------------------------------------
-// NEW: RTL-SDR Register Read Function
-// ---------------------------------------------------------
-esp_err_t rtlsdr_read_reg(usb_device_handle_t dev_hdl, uint8_t block, uint16_t addr, uint8_t *data, uint16_t len) {
-    usb_transfer_t *transfer;
-    
-    // Allocate transfer buffer (8 bytes for USB setup packet + length of data requested)
-    esp_err_t err = usb_host_transfer_alloc(8 + len, 0, &transfer);
-    if (err != ESP_OK) return err;
-
-// Format the USB Setup Packet according to RTL-SDR specifications
-    usb_setup_packet_t *setup = (usb_setup_packet_t *)transfer->data_buffer;
-    setup->bmRequestType = 0xC0;  // 0xC0 = Vendor IN (Read)
-    setup->bRequest = 0;          // 0 = Read Register
-    setup->wValue = addr;         // Register address
-    setup->wIndex = (block << 8); // FIX: Shift the block ID to the high byte!
-    setup->wLength = len;         // Number of bytes to read
-
-    transfer->device_handle = dev_hdl;
-    transfer->bEndpointAddress = 0x00; // Endpoint 0 is always used for Control Transfers
-    transfer->callback = transfer_cb;
-    transfer->context = NULL;
-    transfer->num_bytes = 8 + len;
-
-    // FIX: Use the specific function for Endpoint 0 Control Transfers!
-    err = usb_host_transfer_submit_control(client_hdl, transfer);
-    
-    if (err == ESP_OK) {
-        // Block this task until the transfer_cb gives the semaphore
-        xSemaphoreTake(transfer_sem, pdMS_TO_TICKS(1000));
-        
-        if (transfer->status == USB_TRANSFER_STATUS_COMPLETED) {
-            // Copy the payload data (skip the 8-byte setup packet)
-            memcpy(data, transfer->data_buffer + 8, len);
-        } else {
-            ESP_LOGE(TAG, "USB Transfer failed! Status: %d", transfer->status);
-            err = ESP_FAIL;
-        }
-    } else {
-        // Print the exact error if it fails to submit again
-        ESP_LOGE(TAG, "Failed to submit control transfer: %s", esp_err_to_name(err));
-    }
-    
-    usb_host_transfer_free(transfer);
-    return err;
-}
-
-esp_err_t rtlsdr_write_reg(usb_device_handle_t dev_hdl, uint8_t block, uint16_t addr, uint8_t val) {
-    usb_transfer_t *transfer;
-    
-    esp_err_t err = usb_host_transfer_alloc(8 + 1, 0, &transfer);
-    if (err != ESP_OK) return err;
-
-    usb_setup_packet_t *setup = (usb_setup_packet_t *)transfer->data_buffer;
-    setup->bmRequestType = 0x40;  // 0x40 = Vendor OUT (Write)
-    setup->bRequest = 0;          // 0 = Write Register
-    setup->wValue = addr;         // Register address
-    
-    // FIX: Write commands require the 0x10 magic flag added to the index!
-    setup->wIndex = (block << 8) | 0x10; 
-    
-    setup->wLength = 1;           // Writing 1 byte
-
-    // Place our value into the payload section
-    transfer->data_buffer[8] = val;
-
-    transfer->device_handle = dev_hdl;
-    transfer->bEndpointAddress = 0x00; // Endpoint 0
-    transfer->callback = transfer_cb;
-    transfer->context = NULL;
-    transfer->num_bytes = 8 + 1;
-
-    err = usb_host_transfer_submit_control(client_hdl, transfer);
-    
-    if (err == ESP_OK) {
-        xSemaphoreTake(transfer_sem, pdMS_TO_TICKS(1000));
-        if (transfer->status != USB_TRANSFER_STATUS_COMPLETED) {
-            ESP_LOGE(TAG, "Write Transfer failed! Status: %d", transfer->status);
-            err = ESP_FAIL;
-        }
-    } else {
-        ESP_LOGE(TAG, "Failed to submit write transfer: %s", esp_err_to_name(err));
-    }
-    
-    usb_host_transfer_free(transfer);
-    return err;
-}
-
-esp_err_t rtlsdr_write_reg_16(usb_device_handle_t dev_hdl, uint8_t block, uint16_t addr, uint16_t val) {
-    usb_transfer_t *transfer;
-    
-    // Allocate 8 bytes for setup + 2 bytes for the payload
-    esp_err_t err = usb_host_transfer_alloc(8 + 2, 0, &transfer);
-    if (err != ESP_OK) return err;
-
-    usb_setup_packet_t *setup = (usb_setup_packet_t *)transfer->data_buffer;
-    setup->bmRequestType = 0x40;  
-    setup->bRequest = 0;          
-    setup->wValue = addr;         
-    setup->wIndex = (block << 8) | 0x10; 
-    setup->wLength = 2; // FIX: 2-byte write
-
-    // FIX: librtlsdr strictly uses Big-Endian for 16-bit payloads!
-    transfer->data_buffer[8] = (val >> 8) & 0xFF; // MSB
-    transfer->data_buffer[9] = val & 0xFF;        // LSB
-
-    transfer->device_handle = dev_hdl;
-    transfer->bEndpointAddress = 0x00; 
-    transfer->callback = transfer_cb;
-    transfer->context = NULL;
-    transfer->num_bytes = 8 + 2;
-
-    err = usb_host_transfer_submit_control(client_hdl, transfer);
-    
-    if (err == ESP_OK) {
-        xSemaphoreTake(transfer_sem, pdMS_TO_TICKS(1000));
-        if (transfer->status != USB_TRANSFER_STATUS_COMPLETED) err = ESP_FAIL;
-    }
-    
-    usb_host_transfer_free(transfer);
-    return err;
-}
-esp_err_t rtlsdr_demod_write_reg_16(usb_device_handle_t dev_hdl, uint8_t page, uint16_t addr, uint16_t val) {
-    usb_transfer_t *transfer;
-    esp_err_t err = usb_host_transfer_alloc(8 + 2, 0, &transfer);
-    if (err != ESP_OK) return err;
-
-    usb_setup_packet_t *setup = (usb_setup_packet_t *)transfer->data_buffer;
-    setup->bmRequestType = 0x40;  
-    setup->bRequest = 0;          
-    setup->wValue = (addr << 8) | 0x20; // FIX: Demodulator addressing
-    setup->wIndex = 0x10 | page;        // FIX: Write flag + Page
-    setup->wLength = 2;
-
-    // Big-Endian payload
-    transfer->data_buffer[8] = (val >> 8) & 0xFF; 
-    transfer->data_buffer[9] = val & 0xFF;        
-
-    transfer->device_handle = dev_hdl;
-    transfer->bEndpointAddress = 0x00; 
-    transfer->callback = transfer_cb;
-    transfer->context = NULL;
-    transfer->num_bytes = 8 + 2;
-
-    err = usb_host_transfer_submit_control(client_hdl, transfer);
-    if (err == ESP_OK) {
-        xSemaphoreTake(transfer_sem, pdMS_TO_TICKS(1000));
-        if (transfer->status != USB_TRANSFER_STATUS_COMPLETED) err = ESP_FAIL;
-    }
-    
-    usb_host_transfer_free(transfer);
-    return err;
-}
-
-esp_err_t rtlsdr_demod_read_reg(usb_device_handle_t dev_hdl, uint8_t page, uint16_t addr, uint8_t *data, uint16_t len) {
+static esp_err_t rtlsdr_read_reg(usb_device_handle_t dev_hdl, uint8_t block, uint16_t addr, uint8_t *data,
+                                 uint16_t len)
+{
     usb_transfer_t *transfer;
     esp_err_t err = usb_host_transfer_alloc(8 + len, 0, &transfer);
-    if (err != ESP_OK) return err;
+    if (err != ESP_OK)
+        return err;
 
     usb_setup_packet_t *setup = (usb_setup_packet_t *)transfer->data_buffer;
-    setup->bmRequestType = 0xC0;        // IN (Read)
-    setup->bRequest = 0;          
-    setup->wValue = (addr << 8) | 0x20; // FIX: Demodulator addressing
-    setup->wIndex = page;               // FIX: Reads do not use the 0x10 write flag
+    setup->bmRequestType = 0xC0;
+    setup->bRequest = 0;
+    setup->wValue = addr;
+    setup->wIndex = (uint16_t)(block << 8);
     setup->wLength = len;
 
     transfer->device_handle = dev_hdl;
-    transfer->bEndpointAddress = 0x00; 
+    transfer->bEndpointAddress = 0x00;
     transfer->callback = transfer_cb;
-    transfer->context = NULL;
     transfer->num_bytes = 8 + len;
 
     err = usb_host_transfer_submit_control(client_hdl, transfer);
     if (err == ESP_OK) {
         xSemaphoreTake(transfer_sem, pdMS_TO_TICKS(1000));
-        if (transfer->status == USB_TRANSFER_STATUS_COMPLETED) {
+        err = transfer->status == USB_TRANSFER_STATUS_COMPLETED ? ESP_OK : ESP_FAIL;
+        if (err == ESP_OK)
             memcpy(data, transfer->data_buffer + 8, len);
-        } else {
-            err = ESP_FAIL;
-        }
     }
-    
     usb_host_transfer_free(transfer);
     return err;
 }
 
-/** RTL2832 crystal-based rsamp_ratio; must match rtlsdr_set_sample_rate write/readback. */
-static uint32_t rtlsdr_rsamp_ratio_hz(uint32_t samp_rate_hz)
+static esp_err_t rtlsdr_write_reg(usb_device_handle_t dev_hdl, uint8_t block, uint16_t addr, uint8_t val)
 {
-    uint32_t r = (uint32_t)((28800000ULL << 22) / samp_rate_hz);
-    return r & 0x0FFFFFFC;
-}
+    usb_transfer_t *transfer;
+    esp_err_t err = usb_host_transfer_alloc(8 + 1, 0, &transfer);
+    if (err != ESP_OK)
+        return err;
 
-esp_err_t rtlsdr_set_sample_rate(usb_device_handle_t dev_hdl, uint32_t samp_rate) {
-    uint32_t rsamp_ratio = rtlsdr_rsamp_ratio_hz(samp_rate);
+    usb_setup_packet_t *setup = (usb_setup_packet_t *)transfer->data_buffer;
+    setup->bmRequestType = 0x40;
+    setup->bRequest = 0;
+    setup->wValue = addr;
+    setup->wIndex = (uint16_t)((block << 8) | 0x10);
+    setup->wLength = 1;
+    transfer->data_buffer[8] = val;
+    transfer->device_handle = dev_hdl;
+    transfer->callback = transfer_cb;
+    transfer->num_bytes = 8 + 1;
 
-    ESP_LOGI(TAG, "Setting sample rate to %lu Hz (rsamp_ratio: 0x%08lX)", samp_rate, rsamp_ratio);
-
-    // FIX: Use the specific Demodulator 16-bit write function to Page 1
-    esp_err_t err = rtlsdr_demod_write_reg_16(dev_hdl, 1, 0x9f, (uint16_t)(rsamp_ratio >> 16));
-    if (err != ESP_OK) return err;
-
-    err = rtlsdr_demod_write_reg_16(dev_hdl, 1, 0xa1, (uint16_t)(rsamp_ratio & 0xffff));
+    err = usb_host_transfer_submit_control(client_hdl, transfer);
+    if (err == ESP_OK) {
+        xSemaphoreTake(transfer_sem, pdMS_TO_TICKS(1000));
+        err = transfer->status == USB_TRANSFER_STATUS_COMPLETED ? ESP_OK : ESP_FAIL;
+    }
+    usb_host_transfer_free(transfer);
     return err;
 }
 
-// Matches rtlsdr_i2c_read_reg perfectly
-esp_err_t rtlsdr_i2c_read_reg(usb_device_handle_t dev_hdl, uint8_t i2c_addr, uint8_t reg, uint8_t *val) {
-    uint16_t addr = i2c_addr | (reg << 8);
+static esp_err_t rtlsdr_write_reg_16(usb_device_handle_t dev_hdl, uint8_t block, uint16_t addr, uint16_t val)
+{
+    usb_transfer_t *transfer;
+    esp_err_t err = usb_host_transfer_alloc(8 + 2, 0, &transfer);
+    if (err != ESP_OK)
+        return err;
+
+    usb_setup_packet_t *setup = (usb_setup_packet_t *)transfer->data_buffer;
+    setup->bmRequestType = 0x40;
+    setup->bRequest = 0;
+    setup->wValue = addr;
+    setup->wIndex = (uint16_t)((block << 8) | 0x10);
+    setup->wLength = 2;
+    transfer->data_buffer[8] = (uint8_t)(val >> 8);
+    transfer->data_buffer[9] = (uint8_t)(val & 0xFF);
+    transfer->device_handle = dev_hdl;
+    transfer->callback = transfer_cb;
+    transfer->num_bytes = 8 + 2;
+
+    err = usb_host_transfer_submit_control(client_hdl, transfer);
+    if (err == ESP_OK) {
+        xSemaphoreTake(transfer_sem, pdMS_TO_TICKS(1000));
+        err = transfer->status == USB_TRANSFER_STATUS_COMPLETED ? ESP_OK : ESP_FAIL;
+    }
+    usb_host_transfer_free(transfer);
+    return err;
+}
+
+static esp_err_t rtlsdr_demod_write_reg(usb_device_handle_t dev_hdl, uint8_t page, uint16_t addr, uint8_t val)
+{
+    usb_transfer_t *transfer;
+    esp_err_t err = usb_host_transfer_alloc(8 + 1, 0, &transfer);
+    if (err != ESP_OK)
+        return err;
+
+    usb_setup_packet_t *setup = (usb_setup_packet_t *)transfer->data_buffer;
+    setup->bmRequestType = 0x40;
+    setup->bRequest = 0;
+    setup->wValue = (uint16_t)((addr << 8) | 0x20);
+    setup->wIndex = (uint16_t)(0x10 | page);
+    setup->wLength = 1;
+    transfer->data_buffer[8] = val;
+    transfer->device_handle = dev_hdl;
+    transfer->callback = transfer_cb;
+    transfer->num_bytes = 8 + 1;
+
+    err = usb_host_transfer_submit_control(client_hdl, transfer);
+    if (err == ESP_OK) {
+        xSemaphoreTake(transfer_sem, pdMS_TO_TICKS(1000));
+        err = transfer->status == USB_TRANSFER_STATUS_COMPLETED ? ESP_OK : ESP_FAIL;
+    }
+    usb_host_transfer_free(transfer);
+    return err;
+}
+
+static esp_err_t rtlsdr_demod_write_reg_16(usb_device_handle_t dev_hdl, uint8_t page, uint16_t addr, uint16_t val)
+{
+    usb_transfer_t *transfer;
+    esp_err_t err = usb_host_transfer_alloc(8 + 2, 0, &transfer);
+    if (err != ESP_OK)
+        return err;
+
+    usb_setup_packet_t *setup = (usb_setup_packet_t *)transfer->data_buffer;
+    setup->bmRequestType = 0x40;
+    setup->bRequest = 0;
+    setup->wValue = (uint16_t)((addr << 8) | 0x20);
+    setup->wIndex = (uint16_t)(0x10 | page);
+    setup->wLength = 2;
+    transfer->data_buffer[8] = (uint8_t)(val >> 8);
+    transfer->data_buffer[9] = (uint8_t)(val & 0xFF);
+    transfer->device_handle = dev_hdl;
+    transfer->callback = transfer_cb;
+    transfer->num_bytes = 8 + 2;
+
+    err = usb_host_transfer_submit_control(client_hdl, transfer);
+    if (err == ESP_OK) {
+        xSemaphoreTake(transfer_sem, pdMS_TO_TICKS(1000));
+        err = transfer->status == USB_TRANSFER_STATUS_COMPLETED ? ESP_OK : ESP_FAIL;
+    }
+    usb_host_transfer_free(transfer);
+    return err;
+}
+
+static esp_err_t rtlsdr_i2c_read(usb_device_handle_t dev_hdl, uint8_t i2c_addr, uint8_t reg, uint8_t *val)
+{
+    uint16_t addr = (uint16_t)(i2c_addr | (reg << 8));
     return rtlsdr_read_reg(dev_hdl, 6, addr, val, 1);
 }
 
-// Matches rtlsdr_i2c_write_reg perfectly
-esp_err_t rtlsdr_i2c_write_reg(usb_device_handle_t dev_hdl, uint8_t i2c_addr, uint8_t reg, uint8_t val) {
-    uint16_t addr = i2c_addr | (reg << 8);
+static esp_err_t rtlsdr_i2c_write(usb_device_handle_t dev_hdl, uint8_t i2c_addr, uint8_t reg, uint8_t val)
+{
+    uint16_t addr = (uint16_t)(i2c_addr | (reg << 8));
     return rtlsdr_write_reg(dev_hdl, 6, addr, val);
 }
 
-esp_err_t claim_sdr_interface(usb_device_handle_t dev_hdl) {
-    // The RTL-SDR uses Interface 0, Alternate Setting 0
-    uint8_t bInterfaceNumber = 0;
-    uint8_t bAlternateSetting = 0;
-    
-    // Correctly passing interface first, then alternate setting
-    esp_err_t err = usb_host_interface_claim(client_hdl, dev_hdl, bInterfaceNumber, bAlternateSetting);
-    
-    if (err == ESP_OK) {
-        ESP_LOGI(TAG, "SUCCESS: RTL-SDR Interface 0 claimed!");
-    } else {
-        ESP_LOGE(TAG, "FAILED to claim interface: %s", esp_err_to_name(err));
-    }
-    return err;
-}
-
-esp_err_t rtlsdr_demod_write_reg(usb_device_handle_t dev_hdl, uint8_t page, uint16_t addr, uint8_t val) {
-    usb_transfer_t *transfer;
-    
-    esp_err_t err = usb_host_transfer_alloc(8 + 1, 0, &transfer);
-    if (err != ESP_OK) return err;
-
-    usb_setup_packet_t *setup = (usb_setup_packet_t *)transfer->data_buffer;
-    setup->bmRequestType = 0x40;  
-    setup->bRequest = 0;          
-    setup->wValue = (addr << 8) | 0x20; 
-    setup->wIndex = 0x10 | page;       
-    setup->wLength = 1;
-
-    transfer->data_buffer[8] = val;
-
-    transfer->device_handle = dev_hdl;
-    transfer->bEndpointAddress = 0x00; 
-    transfer->callback = transfer_cb;
-    transfer->context = NULL;
-    transfer->num_bytes = 8 + 1;
-
-    // --- NEW DEBUGGING OUTPUT: RAW PACKET DUMP ---
-    uint8_t *raw_bytes = (uint8_t *)transfer->data_buffer;
-    ESP_LOGI(TAG, "--- DEMOD WRITE PACKET DUMP ---");
-    ESP_LOGI(TAG, "Target: Page=0x%02X, Addr=0x%02X, Val=0x%02X", page, addr, val);
-    ESP_LOGI(TAG, "Setup Bytes: %02X %02X %02X %02X %02X %02X %02X %02X",
-             raw_bytes[0], raw_bytes[1], raw_bytes[2], raw_bytes[3], 
-             raw_bytes[4], raw_bytes[5], raw_bytes[6], raw_bytes[7]);
-    ESP_LOGI(TAG, "Payload: %02X", raw_bytes[8]);
-    ESP_LOGI(TAG, "-------------------------------");
-
-    err = usb_host_transfer_submit_control(client_hdl, transfer);
-    
-    if (err == ESP_OK) {
-        xSemaphoreTake(transfer_sem, pdMS_TO_TICKS(1000));
-        if (transfer->status != USB_TRANSFER_STATUS_COMPLETED) {
-            ESP_LOGE(TAG, "Demod Write Transfer failed! Status: %d", transfer->status);
-            err = ESP_FAIL;
-        }
-    }
-    
-    usb_host_transfer_free(transfer);
-    return err;
-}
-
-esp_err_t rtlsdr_set_i2c_repeater(usb_device_handle_t dev_hdl, bool on) {
-    // In librtlsdr, this opens Demodulator Page 1, Address 0x01
-    // 0x18 turns the gate ON, 0x10 turns it OFF
+static esp_err_t i2c_repeater(usb_device_handle_t dev_hdl, bool on)
+{
     return rtlsdr_demod_write_reg(dev_hdl, 1, 0x01, on ? 0x18 : 0x10);
 }
 
-esp_err_t rtlsdr_init_baseband_real(usb_device_handle_t dev_hdl) {
-    esp_err_t err;
-    
-    ESP_LOGI(TAG, "Initializing RTL2832U Baseband & SDR Mode...");
-    
-    // 1. Set USB EPA Maximum Packet Size to 512 bytes
-    err = rtlsdr_write_reg_16(dev_hdl, 1, 0x2158, 0x0002);
-    if (err != ESP_OK) return err;
-
-    // 2. Power on the Demodulator 
-    rtlsdr_write_reg(dev_hdl, 2, 0x300B, 0x22); 
-    rtlsdr_write_reg(dev_hdl, 2, 0x3000, 0xE8); 
-
-    // 3. Reset the Demodulator state machine
-    rtlsdr_demod_write_reg(dev_hdl, 1, 0x01, 0x14);
-    rtlsdr_demod_write_reg(dev_hdl, 1, 0x01, 0x10);
-
-    // 4. THE MAGIC SWITCH: Enable SDR Mode & Disable DAGC
-    rtlsdr_demod_write_reg(dev_hdl, 0, 0x19, 0x05);
-
-    // 5. Default ADC datapath 
-    rtlsdr_demod_write_reg(dev_hdl, 0, 0x06, 0x80);
-
-    // 6. Enable Zero-IF mode / baseband output
-    rtlsdr_demod_write_reg(dev_hdl, 1, 0xB1, 0x1B);
-
-    // --- THE NEW FIXES ---
-    
-    // 7. KILL THE PID FILTER (Stops the 188-byte fragmentation!)
-    rtlsdr_demod_write_reg(dev_hdl, 0, 0x61, 0x60);
-
-    // 8. Disable the Demodulator RF and IF AGC loops (Stops the breathing!)
-    rtlsdr_demod_write_reg(dev_hdl, 1, 0x04, 0x00);
-    
-    // 9. Disable the secondary digital AGC (Bit 0)
-    rtlsdr_demod_write_reg(dev_hdl, 1, 0x11, 0x00);
-
-    ESP_LOGI(TAG, "Baseband initialized! PID Filters DEAD. ADC routed to USB.");
-    return ESP_OK;
+static uint32_t rtl_rsamp_ratio(uint32_t rate_hz)
+{
+    return ((uint32_t)((28800000ULL << 22) / rate_hz)) & 0x0FFFFFFCu;
 }
 
-esp_err_t rtlsdr_init_tuner(usb_device_handle_t dev_hdl) {
-    esp_err_t err = ESP_OK;
-    ESP_LOGI(TAG, "Writing R820T2 Initialization Array...");
-
-    // 1. Open I2C gate
-    err = rtlsdr_set_i2c_repeater(dev_hdl, true);
-    if (err != ESP_OK) return err;
-
-    // 2. Blast the array to registers 0x05 through 0x1F
-    for (int i = 0; i < 27; i++) {
-        uint8_t reg = 0x05 + i;
-        err = rtlsdr_i2c_write_reg(dev_hdl, 0x34, reg, r82xx_shadow_regs[i]);
-        
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to write tuner init reg 0x%02X", reg);
-            break; // Stop immediately if a write fails
-        }
-    }
-
-    // After blasting the init array, lower the R820T2's internal HP filter corner.
-    // In zero-IF mode the IF sits at/near DC; the default HP corner (reg 0x07 bit 0 = 1)
-    // can attenuate the baseband signal.  Clearing bit 0 moves the corner as low as possible.
-    if (err == ESP_OK) {
-        err = rtlsdr_set_i2c_repeater(dev_hdl, true);
-        if (err == ESP_OK) {
-            uint8_t reg07 = r82xx_shadow_regs[0x07 - 0x05];
-            reg07 &= ~0x01; // Clear bit 0: lower HP corner for zero-IF
-            err = rtlsdr_i2c_write_reg(dev_hdl, 0x34, 0x07, reg07);
-            r82xx_shadow_regs[0x07 - 0x05] = reg07;
-        }
-        rtlsdr_set_i2c_repeater(dev_hdl, false);
-    }
-
-    // 3. Close I2C gate
-    rtlsdr_set_i2c_repeater(dev_hdl, false);
-
-    if (err == ESP_OK) {
-        ESP_LOGI(TAG, "===========================================");
-        ESP_LOGI(TAG, "SUCCESS! Tuner Initialized to Default State");
-        ESP_LOGI(TAG, "===========================================");
-    }
-
+static esp_err_t rtl_set_sample_rate(usb_device_handle_t dev_hdl, uint32_t samp_rate_hz)
+{
+    uint32_t r = rtl_rsamp_ratio(samp_rate_hz);
+    esp_err_t err = rtlsdr_demod_write_reg_16(dev_hdl, 1, 0x9f, (uint16_t)(r >> 16));
+    if (err == ESP_OK)
+        err = rtlsdr_demod_write_reg_16(dev_hdl, 1, 0xa1, (uint16_t)(r & 0xFFFF));
     return err;
 }
 
-esp_err_t rtlsdr_tune_105_3mhz_mock(usb_device_handle_t dev_hdl) {
-    ESP_LOGI(TAG, "Tuning R820T2 to 105.3 MHz...");
+static esp_err_t claim_if0(usb_device_handle_t dev_hdl)
+{
+    return usb_host_interface_claim(client_hdl, dev_hdl, 0, 0);
+}
 
-    esp_err_t err = rtlsdr_set_i2c_repeater(dev_hdl, true);
-    if (err != ESP_OK) return err;
+static esp_err_t init_baseband(usb_device_handle_t dev_hdl)
+{
+    esp_err_t err = rtlsdr_write_reg_16(dev_hdl, 1, 0x2158, 0x0002);
+    if (err != ESP_OK)
+        return err;
 
-    // Write the new calculated PLL values for 105.3 MHz
-    rtlsdr_i2c_write_reg(dev_hdl, 0x34, 0x1A, 0x76); // Integer part (118)
-    rtlsdr_i2c_write_reg(dev_hdl, 0x34, 0x1B, 0x4C); // Fractional MSB
-    rtlsdr_i2c_write_reg(dev_hdl, 0x34, 0x1C, 0xCD); // Fractional LSB
+    rtlsdr_write_reg(dev_hdl, 2, 0x300B, 0x22);
+    rtlsdr_write_reg(dev_hdl, 2, 0x3000, 0xE8);
 
-    // Trigger the VCO calibration cycle
-    rtlsdr_i2c_write_reg(dev_hdl, 0x34, 0x1A, 0x76); 
+    rtlsdr_demod_write_reg(dev_hdl, 1, 0x01, 0x14);
+    rtlsdr_demod_write_reg(dev_hdl, 1, 0x01, 0x10);
 
-    vTaskDelay(pdMS_TO_TICKS(50));
-
-    // Read Register 0x00 to check the lock status
-    uint8_t lock_status = 0;
-    rtlsdr_i2c_read_reg(dev_hdl, 0x34, 0x02, &lock_status);
-    
-    rtlsdr_set_i2c_repeater(dev_hdl, false);
-
-    ESP_LOGI(TAG, "Tuner Reg 0x02 (status byte): 0x%02X", lock_status);
-    
-    // Verify Bit 6 (0x40) for PLL Lock
-    if (lock_status & 0x40) {
-        ESP_LOGI(TAG, "===========================================");
-        ESP_LOGI(TAG, "SUCCESS! Hardware PLL Locked to 105.3 MHz!");
-        ESP_LOGI(TAG, "===========================================");
-    } else {
-        ESP_LOGE(TAG, "PLL Failed to lock. Status: 0x%02X", lock_status);
-    }
-
+    rtlsdr_demod_write_reg(dev_hdl, 0, 0x19, 0x05);
+    rtlsdr_demod_write_reg(dev_hdl, 0, 0x06, 0x80);
+    rtlsdr_demod_write_reg(dev_hdl, 1, 0xB1, 0x1B);
+    rtlsdr_demod_write_reg(dev_hdl, 0, 0x61, 0x60);
+    rtlsdr_demod_write_reg(dev_hdl, 1, 0x04, 0x00);
+    rtlsdr_demod_write_reg(dev_hdl, 1, 0x11, 0x00);
     return ESP_OK;
 }
 
-// Mixes the 3.57 MHz IF down to ~50 kHz (not 0 Hz).
-// Leaving a 50 kHz residual keeps the FM carrier away from DC so that:
-//   1. The RTL2832U's internal DC correction loop (~19 Hz BW) doesn't kill the signal
-//   2. The FPGA's dc_offset module (~19 Hz BW) also leaves it untouched
-// NCO value: old 0x381121 scaled by (3520000/3570000) ≈ 0x374813
-esp_err_t rtlsdr_set_if_357mhz_mock(usb_device_handle_t dev_hdl) {
-    ESP_LOGI(TAG, "Configuring RTL2832U DDC for 3.52 MHz mix-down (50 kHz offset)...");
+static esp_err_t init_tuner_regs(usb_device_handle_t dev_hdl)
+{
+    esp_err_t err = i2c_repeater(dev_hdl, true);
+    if (err != ESP_OK)
+        return err;
 
-    // 0x374813 mixes 3.57 MHz IF to ~+50 kHz in baseband
-    rtlsdr_demod_write_reg(dev_hdl, 1, 0x19, 0x37); // High byte
-    rtlsdr_demod_write_reg(dev_hdl, 1, 0x1A, 0x48); // Middle byte
-    rtlsdr_demod_write_reg(dev_hdl, 1, 0x1B, 0x13); // Low byte
-
-    // Verification Readback
-    uint8_t r19 = 0, r1A = 0, r1B = 0;
-    rtlsdr_demod_read_reg(dev_hdl, 1, 0x19, &r19, 1);
-    rtlsdr_demod_read_reg(dev_hdl, 1, 0x1A, &r1A, 1);
-    rtlsdr_demod_read_reg(dev_hdl, 1, 0x1B, &r1B, 1);
-
-    // Reconstruct the 22-bit value
-    uint32_t verified_nco = (r19 << 16) | (r1A << 8) | r1B;
-    verified_nco &= 0x3FFFFF;
-
-    ESP_LOGI(TAG, "Verified NCO Readback: 0x%06lX", verified_nco);
-
-    if (verified_nco == 0x374813) {
-        ESP_LOGI(TAG, "===========================================");
-        ESP_LOGI(TAG, "SUCCESS! IF Down-Converter Configured (50 kHz offset)!");
-        ESP_LOGI(TAG, "===========================================");
-    } else {
-        ESP_LOGE(TAG, "NCO mismatch! Expected 0x374813, got 0x%06lX", verified_nco);
-        return ESP_FAIL;
+    for (int i = 0; i < 27; i++) {
+        uint8_t reg = (uint8_t)(0x05 + i);
+        err = rtlsdr_i2c_write(dev_hdl, 0x34, reg, r82xx_shadow_regs[i]);
+        if (err != ESP_OK)
+            break;
     }
+    i2c_repeater(dev_hdl, false);
+    return err;
+}
+
+static esp_err_t tuner_auto_gain(usb_device_handle_t dev_hdl)
+{
+    esp_err_t err = i2c_repeater(dev_hdl, true);
+    if (err != ESP_OK)
+        goto done;
+
+    uint8_t reg05 = (uint8_t)(r82xx_shadow_regs[0] & ~(uint8_t)0x10);
+    rtlsdr_i2c_write(dev_hdl, 0x34, 0x05, reg05);
+    r82xx_shadow_regs[0] = reg05;
+
+    uint8_t reg07 = (uint8_t)(r82xx_shadow_regs[2] | (uint8_t)0x10);
+    rtlsdr_i2c_write(dev_hdl, 0x34, 0x07, reg07);
+    r82xx_shadow_regs[2] = reg07;
+
+    uint8_t reg0c = (uint8_t)((r82xx_shadow_regs[7] & ~(uint8_t)0x9F) | 0x0B);
+    rtlsdr_i2c_write(dev_hdl, 0x34, 0x0C, reg0c);
+    r82xx_shadow_regs[7] = reg0c;
+
+done:
+    i2c_repeater(dev_hdl, false);
+    return err;
+}
+
+/** R820T2 ~105.3 MHz (mock PLL words from prior project baseline). */
+static esp_err_t tune_fm_band(usb_device_handle_t dev_hdl)
+{
+    esp_err_t err = i2c_repeater(dev_hdl, true);
+    if (err != ESP_OK)
+        return err;
+
+    rtlsdr_i2c_write(dev_hdl, 0x34, 0x1A, 0x76);
+    rtlsdr_i2c_write(dev_hdl, 0x34, 0x1B, 0x4C);
+    rtlsdr_i2c_write(dev_hdl, 0x34, 0x1C, 0xCD);
+    rtlsdr_i2c_write(dev_hdl, 0x34, 0x1A, 0x76); /* cal */
+    i2c_repeater(dev_hdl, false);
+    vTaskDelay(pdMS_TO_TICKS(40));
     return ESP_OK;
-}      
+}
 
-// A queue that holds POINTERS to our USB buckets, not the data itself!
-static QueueHandle_t bucket_queue;
+/** RTL2832 digital mixer (22-bit); value matches FPGA IF plan (~50 kHz offset @ 882 kHz). */
+static esp_err_t set_ddc_nco(usb_device_handle_t dev_hdl)
+{
+    esp_err_t err = rtlsdr_demod_write_reg(dev_hdl, 1, 0x19, 0x37);
+    if (err != ESP_OK)
+        return err;
+    err = rtlsdr_demod_write_reg(dev_hdl, 1, 0x1A, 0x48);
+    if (err != ESP_OK)
+        return err;
+    return rtlsdr_demod_write_reg(dev_hdl, 1, 0x1B, 0x13);
+}
 
-static volatile uint32_t ringbuf_overflows = 0;
-
-// Diagnostic counters
-static volatile uint32_t bytes_received_usb = 0;
-
-static void bulk_transfer_cb(usb_transfer_t *transfer) {
-    if (transfer->status == USB_TRANSFER_STATUS_COMPLETED) {
-        
-        // Toss the POINTER to the bucket into the queue.
-        // Timeout is 0. If the DSP task is too slow, we don't wait!
-        if (xQueueSend(bucket_queue, &transfer, 0) != pdTRUE) {
-            // Queue is full! The DSP task is falling behind.
-            // We MUST resubmit immediately to keep the USB hardware alive.
-            ringbuf_overflows++;
-            usb_host_transfer_submit(transfer);
-        }
-        
-    } else {
-        ESP_LOGE(TAG, "Bulk transfer failed! Status: %d", transfer->status);
-        // Even on failure, try to keep the stream alive
+static void bulk_cb(usb_transfer_t *transfer)
+{
+    if (transfer->status != USB_TRANSFER_STATUS_COMPLETED) {
         usb_host_transfer_submit(transfer);
+        return;
     }
+    if (xQueueSend(bucket_queue, &transfer, 0) != pdTRUE)
+        usb_host_transfer_submit(transfer);
 }
 
-// 3. The function to kick off the Ping-Pong stream
-esp_err_t start_sdr_stream(usb_device_handle_t dev_hdl) {
-    ESP_LOGI(TAG, "Starting Ping-Pong Bulk Transfers...");
-    
-    // Clear the FIFO on the RTL2832U
-    rtlsdr_write_reg_16(dev_hdl, 1, 0x2148, 0x1002); 
-    rtlsdr_write_reg_16(dev_hdl, 1, 0x2148, 0x0000); 
+static esp_err_t start_bulk(usb_device_handle_t dev_hdl)
+{
+    rtlsdr_write_reg_16(dev_hdl, 1, 0x2148, 0x1002);
+    rtlsdr_write_reg_16(dev_hdl, 1, 0x2148, 0x0000);
 
-    // Allocate and submit BOTH buckets simultaneously
     for (int i = 0; i < NUM_BULK_TRANSFERS; i++) {
         usb_transfer_t *transfer;
         esp_err_t err = usb_host_transfer_alloc(SDR_BULK_BUFFER_SIZE, 0, &transfer);
-        if (err != ESP_OK) return err;
+        if (err != ESP_OK)
+            return err;
 
         transfer->device_handle = dev_hdl;
-        transfer->bEndpointAddress = 0x81; 
-        transfer->callback = bulk_transfer_cb;
-        transfer->context = (void*)i; // We can use this to identify Bucket 0 or 1 later
+        transfer->bEndpointAddress = 0x81;
+        transfer->callback = bulk_cb;
         transfer->num_bytes = SDR_BULK_BUFFER_SIZE;
 
         err = usb_host_transfer_submit(transfer);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to submit transfer %d", i);
+        if (err != ESP_OK)
             return err;
-        }
-        ESP_LOGI(TAG, "Bucket %d deployed into the stream.", i);
     }
-    
     return ESP_OK;
 }
 
-esp_err_t rtlsdr_set_tuner_auto_gain(usb_device_handle_t dev_hdl) {
-    ESP_LOGI(TAG, "Setting R820T2 Tuner to Auto Gain...");
-    
-    // Open the I2C bridge
-    rtlsdr_set_i2c_repeater(dev_hdl, true);
+static uint8_t decim_dma[SDR_BULK_BUFFER_SIZE / DECIMATION_FACTOR];
 
-    // 1. Register 0x05: LNA Gain Mode (Bit 4: 0 = Auto)
-    uint8_t reg05 = r82xx_shadow_regs[0x05 - 0x05];
-    reg05 &= ~0x10; // Clear bit 4
-    rtlsdr_i2c_write_reg(dev_hdl, 0x34, 0x05, reg05);
-    r82xx_shadow_regs[0] = reg05;
+static void dsp_task(void *arg)
+{
+    (void)arg;
+    ESP_LOGI(TAG, "streaming (every %u-th IQ pair)", (unsigned)DECIMATION_FACTOR);
 
-    // 2. Register 0x07: Mixer Gain Mode (Bit 4: 1 = Auto)
-    uint8_t reg07 = r82xx_shadow_regs[0x07 - 0x05];
-    reg07 |= 0x10; // Set bit 4
-    rtlsdr_i2c_write_reg(dev_hdl, 0x34, 0x07, reg07);
-    r82xx_shadow_regs[2] = reg07;
+    for (;;) {
+        usb_transfer_t *transfer;
+        if (xQueueReceive(bucket_queue, &transfer, portMAX_DELAY) != pdTRUE)
+            continue;
 
-    // 3. Register 0x0C: VGA Gain (Fixed to 26.5 dB -> Mask 0x9F with 0x0B)
-    uint8_t reg0c = r82xx_shadow_regs[0x0C - 0x05];
-    reg0c = (reg0c & ~0x9F) | 0x0B;
-    rtlsdr_i2c_write_reg(dev_hdl, 0x34, 0x0C, reg0c);
-    r82xx_shadow_regs[7] = reg0c;
+        const uint8_t *raw = transfer->data_buffer;
+        int nbytes = transfer->actual_num_bytes;
+        int npairs_trim = ((nbytes / 2) / DECIMATION_FACTOR) * DECIMATION_FACTOR;
 
-    // Close the I2C bridge
-    rtlsdr_set_i2c_repeater(dev_hdl, false);
-    
-    ESP_LOGI(TAG, "Auto Gain Configured!");
-    return ESP_OK;
-}
-
-esp_err_t rtlsdr_set_tuner_manual_gain(usb_device_handle_t dev_hdl) {
-    ESP_LOGI(TAG, "Setting R820T2 Tuner to Manual Gain (High)...");
-    
-    rtlsdr_set_i2c_repeater(dev_hdl, true);
-
-    // 1. Disable LNA Auto Gain (Register 0x05, Bit 4 = 1) and set LNA to Max (Index 15 -> 0x0F)
-    uint8_t reg05 = r82xx_shadow_regs[0x05 - 0x05];
-    reg05 = (reg05 & ~0x1F) | 0x1F; // Set bit 4 (manual) and bits 0-3 (max gain index)
-    rtlsdr_i2c_write_reg(dev_hdl, 0x34, 0x05, reg05);
-    r82xx_shadow_regs[0] = reg05;
-
-    // 2. Disable Mixer Auto Gain (Register 0x07, Bit 4 = 0) and set Mixer to Max (Index 15 -> 0x0F)
-    uint8_t reg07 = r82xx_shadow_regs[0x07 - 0x05];
-    reg07 = (reg07 & ~0x1F) | 0x0F; // Clear bit 4 (manual) and set bits 0-3 (max gain index)
-    rtlsdr_i2c_write_reg(dev_hdl, 0x34, 0x07, reg07);
-    r82xx_shadow_regs[2] = reg07;
-
-    // 3. Set VGA Gain (Register 0x0C) to a fixed high value (e.g., 0x08 from the driver)
-    uint8_t reg0c = r82xx_shadow_regs[0x0C - 0x05];
-    reg0c = (reg0c & ~0x9F) | 0x08;
-    rtlsdr_i2c_write_reg(dev_hdl, 0x34, 0x0C, reg0c);
-    r82xx_shadow_regs[7] = reg0c;
-
-    rtlsdr_set_i2c_repeater(dev_hdl, false);
-    
-    ESP_LOGI(TAG, "Manual Gain Configured!");
-    return ESP_OK;
-}
-
-static void sdr_control_task(void *arg) {
-    usb_device_handle_t dev_hdl;
-    
-    while (1) {
-        if (xQueueReceive(sdr_queue, &dev_hdl, portMAX_DELAY)) {
-            ESP_LOGI(TAG, "Device handle received. Claiming interface...");
-            if (claim_sdr_interface(dev_hdl) != ESP_OK) continue;
-            
-            // 1. Wake up the RTL2832U Demodulator
-            if (rtlsdr_init_baseband_real(dev_hdl) != ESP_OK) {
-                ESP_LOGE(TAG, "Failed to power on Demodulator.");
-                continue;
-            }
-            
-            // 2. Ping/Init Tuner
-            rtlsdr_set_i2c_repeater(dev_hdl, true);
-            uint8_t tuner_id = 0;
-            rtlsdr_i2c_read_reg(dev_hdl, 0x34, 0x00, &tuner_id);
-            rtlsdr_set_i2c_repeater(dev_hdl, false);
-            
-            if (tuner_id == 0x69) {
-                rtlsdr_init_tuner(dev_hdl);
-
-                /* Auto gain: RF level drops when antenna is removed — easier to validate RF vs noise floor. */
-                rtlsdr_set_tuner_auto_gain(dev_hdl);
-
-                ESP_LOGI(TAG, "RTL IQ rate: %u Hz SPS -> ESP decimate x%u -> I2S IQ ~%u Hz (pairs/s)",
-                         SDR_USB_IQ_RATE_HZ, DECIMATION_FACTOR, SDR_IQ_RATE_AFTER_DECIM);
-
-                rtlsdr_set_sample_rate(dev_hdl, SDR_USB_IQ_RATE_HZ);
-
-                uint32_t expected_ratio = rtlsdr_rsamp_ratio_hz(SDR_USB_IQ_RATE_HZ);
-
-                uint8_t read_buf[2];
-                uint16_t high_val, low_val;
-
-                rtlsdr_demod_read_reg(dev_hdl, 1, 0x9f, read_buf, 2);
-                high_val = (read_buf[0] << 8) | read_buf[1];
-
-                rtlsdr_demod_read_reg(dev_hdl, 1, 0xa1, read_buf, 2);
-                low_val = (read_buf[0] << 8) | read_buf[1];
-
-                uint32_t verified_ratio = ((uint32_t)high_val << 16) | low_val;
-
-                ESP_LOGI(TAG, "rsamp_ratio readback: 0x%08lX (expected 0x%08lX for %u Hz)",
-                         (unsigned long)verified_ratio, (unsigned long)expected_ratio, SDR_USB_IQ_RATE_HZ);
-
-                if (verified_ratio == expected_ratio) {
-                    ESP_LOGI(TAG, "Sample rate registers match computed rsamp_ratio.");
-                } else {
-                    ESP_LOGW(TAG, "rsamp_ratio readback differs — tuner may still work; check tuning if IQ looks wrong.");
-                }
-
-                // --- NEW: Step 7 - Tuner PLL Lock Test ---
-                rtlsdr_tune_105_3mhz_mock(dev_hdl);
-
-                // --- NEW STEP: Step 8 - DDC IF Mix-down ---
-                rtlsdr_set_if_357mhz_mock(dev_hdl);
-                
-                // --- NEW STEP: Step 9 - Start the Data Stream! ---
-                start_sdr_stream(dev_hdl);
-
-            } else {
-                ESP_LOGE(TAG, "Tuner not found. Cannot proceed.");
-            }
+        int out_idx = 0;
+        for (int pair = 0; pair < npairs_trim; pair += DECIMATION_FACTOR) {
+            int idx = pair * 2;
+            decim_dma[out_idx++] = raw[idx];
+            decim_dma[out_idx++] = raw[idx + 1];
         }
+
+        if (out_idx > 0) {
+            size_t written = 0;
+            i2s_channel_write(tx_handle, decim_dma, (size_t)out_idx, &written, portMAX_DELAY);
+            (void)written;
+        }
+
+        usb_host_transfer_submit(transfer);
+        taskYIELD();
     }
 }
 
-// ---------------------------------------------------------
-// Existing USB Event Handling
-// ---------------------------------------------------------
-static void usb_lib_task(void *arg) {
-    while (1) {
-        uint32_t event_flags;
-        usb_host_lib_handle_events(portMAX_DELAY, &event_flags);
-        if (event_flags & USB_HOST_LIB_EVENT_FLAGS_NO_CLIENTS) {
+static void usb_lib_task(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        uint32_t flags = 0;
+        usb_host_lib_handle_events(portMAX_DELAY, &flags);
+        if (flags & USB_HOST_LIB_EVENT_FLAGS_NO_CLIENTS)
             ESP_ERROR_CHECK(usb_host_device_free_all());
-        }
-        if (event_flags & USB_HOST_LIB_EVENT_FLAGS_ALL_FREE) {
+        if (flags & USB_HOST_LIB_EVENT_FLAGS_ALL_FREE)
             break;
-        }
     }
     vTaskDelete(NULL);
 }
 
-static void client_event_cb(const usb_host_client_event_msg_t *msg, void *arg) {
+static void on_client_event(const usb_host_client_event_msg_t *msg, void *arg)
+{
+    (void)arg;
+
     if (msg->event == USB_HOST_CLIENT_EVENT_NEW_DEV) {
         usb_device_handle_t dev_hdl;
-        esp_err_t err = usb_host_device_open(client_hdl, msg->new_dev.address, &dev_hdl);
-        
-        if (err == ESP_OK) {
-            const usb_device_desc_t *dev_desc;
-            usb_host_get_device_descriptor(dev_hdl, &dev_desc);
-            
-            // Log the actual hardware IDs!
-            ESP_LOGI(TAG, "USB Device Found! VID: 0x%04X, PID: 0x%04X", 
-                     dev_desc->idVendor, dev_desc->idProduct);
-            
-                     // --- NEW DIAGNOSTIC: READ NEGOTIATED ENDPOINT SIZES ---
-            const usb_config_desc_t *config_desc;
-            if (usb_host_get_active_config_descriptor(dev_hdl, &config_desc) == ESP_OK) {
-                const uint8_t *p = (const uint8_t *)config_desc;
-                int offset = 0;
-                while (offset < config_desc->wTotalLength) {
-                    uint8_t len = p[offset];
-                    uint8_t type = p[offset + 1];
-                    if (type == 0x05) { // 0x05 is the USB code for an Endpoint Descriptor
-                        usb_ep_desc_t *ep = (usb_ep_desc_t *)&p[offset];
-                        ESP_LOGW(TAG, "DIAGNOSTIC -> Endpoint 0x%02X: MaxPacketSize = %d bytes", 
-                                 ep->bEndpointAddress, ep->wMaxPacketSize);
-                    }
-                    offset += len;
-                    if (len == 0) break; // Prevent infinite loop on bad descriptor
-                }
-            }
-            // ------------------------------------------------------
-            
-            ESP_LOGI(TAG, "SUCCESS: Bypassing strict ID check. Sending to task...");
-            
-            // PASS THE DEVICE HANDLE TO OUR NEW TASK VIA QUEUE
-            xQueueSend(sdr_queue, &dev_hdl, portMAX_DELAY);
-        }
+        if (usb_host_device_open(client_hdl, msg->new_dev.address, &dev_hdl) != ESP_OK)
+            return;
+        const usb_device_desc_t *desc;
+        if (usb_host_get_device_descriptor(dev_hdl, &desc) == ESP_OK)
+            ESP_LOGI(TAG, "RTL-SDR USB %04x:%04x", desc->idVendor, desc->idProduct);
+
+        xQueueSend(sdr_queue, &dev_hdl, portMAX_DELAY);
     } else if (msg->event == USB_HOST_CLIENT_EVENT_DEV_GONE) {
-        ESP_LOGI(TAG, "Device disconnected.");
         usb_host_device_close(client_hdl, msg->dev_gone.dev_hdl);
     }
 }
 
-// CAPTURE 1000 SAMPLES
-// --- RAM CAPTURE STATE VARIABLES ---
-#define CAPTURE_SIZE 1000
+static void sdr_boot_task(void *arg)
+{
+    (void)arg;
 
-static volatile int capture_count = 0;
-static volatile bool trigger_fired = false;
-static volatile bool dump_complete = false;
+    for (;;) {
+        usb_device_handle_t dev_hdl;
+        if (xQueueReceive(sdr_queue, &dev_hdl, portMAX_DELAY) != pdTRUE)
+            continue;
 
-// #################################################
-// dsp_i2s_task: FIR DECIMATION + RAM CAPTURE ######
-// #################################################
-// static uint8_t capture_i[CAPTURE_SIZE];
-// static uint8_t capture_q[CAPTURE_SIZE];
-// static void dsp_i2s_task(void *arg) {
-//     ESP_LOGI(TAG, "Initializing Hardware FIR Decimator...");
-    
-//     // Initialize the ESP-DSP FIR decimation structures
-//     dsps_fird_init_f32(&fir_state_i, fir_coeffs, delay_line_i, FIR_TAPS, DECIMATION_FACTOR);
-//     dsps_fird_init_f32(&fir_state_q, fir_coeffs, delay_line_q, FIR_TAPS, DECIMATION_FACTOR);
+        if (claim_if0(dev_hdl) != ESP_OK)
+            continue;
+        if (init_baseband(dev_hdl) != ESP_OK)
+            continue;
 
-//     ESP_LOGI(TAG, "FIR Decimator Online. Waiting for Signal Swing...");
-    
-//     usb_transfer_t *transfer;
-//     uint8_t *decimated_buffer = malloc(SDR_BULK_BUFFER_SIZE / 4);
-    
-//     uint32_t bytes_processed = 0;
-//     TickType_t last_print = xTaskGetTickCount();
+        uint8_t tid = 0;
+        i2c_repeater(dev_hdl, true);
+        rtlsdr_i2c_read(dev_hdl, 0x34, 0x00, &tid);
+        i2c_repeater(dev_hdl, false);
 
-//     uint8_t heartbeat_min = 255;
-//     uint8_t heartbeat_max = 0;
-
-//     while (1) {
-//         if (xQueueReceive(bucket_queue, &transfer, portMAX_DELAY)) {
-//             uint8_t *raw_data = transfer->data_buffer;
-//             int raw_len = transfer->actual_num_bytes;
-            
-//             // --- THE FIX ---
-//             // Ensure input pairs are a perfect multiple of the decimation factor (4).
-//             // Using bitwise AND (~3) chops off any loose, fragmented bytes at the end of the bucket.
-//             int num_input_pairs = (raw_len / 2) & ~3; 
-
-//             // 1. SPLIT & FLOAT
-//             for (int k = 0; k < num_input_pairs; k++) {
-//                 input_i_f32[k] = (float)raw_data[k * 2] - 128.0f;
-//                 input_q_f32[k] = (float)raw_data[(k * 2) + 1] - 128.0f;
-//             }
-
-//             // ESP-DSP Decimators require the number of OUTPUT samples to generate, NOT the input length!
-//             int num_output_pairs = num_input_pairs / DECIMATION_FACTOR;
-
-//             // 2. HARDWARE FILTER & DECIMATE
-//             dsps_fird_f32(&fir_state_i, input_i_f32, output_i_f32, num_output_pairs);
-//             dsps_fird_f32(&fir_state_q, input_q_f32, output_q_f32, num_output_pairs);
-
-//             // 3. RE-PACK, CLAMP & SMART TRIGGER
-//             int out_idx = 0;
-
-//             for (int k = 0; k < num_output_pairs; k++) {
-                
-//                 float i_val_f = output_i_f32[k] + 128.0f;
-//                 float q_val_f = output_q_f32[k] + 128.0f;
-
-//                 if (i_val_f > 255.0f) i_val_f = 255.0f;
-//                 if (i_val_f < 0.0f) i_val_f = 0.0f;
-//                 if (q_val_f > 255.0f) q_val_f = 255.0f;
-//                 if (q_val_f < 0.0f) q_val_f = 0.0f;
-
-//                 uint8_t i_val = (uint8_t)i_val_f;
-//                 uint8_t q_val = (uint8_t)q_val_f;
-
-//                 decimated_buffer[out_idx++] = i_val;
-//                 decimated_buffer[out_idx++] = q_val;
-
-//                 // Track the swing of the FILTERED data
-//                 if (i_val < heartbeat_min) heartbeat_min = i_val;
-//                 if (i_val > heartbeat_max) heartbeat_max = i_val;
-
-//                 // Trigger Logic
-//                 if (!trigger_fired && (i_val > 132 || i_val < 123)) {
-//                     trigger_fired = true;
-//                     ESP_LOGW(TAG, "SIGNAL DETECTED! Snapping 1000 FIR-filtered samples to RAM...");
-//                 }
-
-//                 // Zero-Delay RAM Capture
-//                 if (trigger_fired && capture_count < CAPTURE_SIZE) {
-//                     capture_i[capture_count] = i_val;
-//                     capture_q[capture_count] = q_val;
-//                     capture_count++;
-//                 }
-//             }
-
-//             // 4. Send the pristine baseband to the I2S Hardware
-//             size_t written = 0;
-//             i2s_channel_write(tx_handle, decimated_buffer, out_idx, &written, portMAX_DELAY);
-//             bytes_processed += written; 
-
-//             // 5. Hand the bucket back to USB immediately
-//             usb_host_transfer_submit(transfer);
-
-//             // 6. HEARTBEAT & SLOW PRINTING
-//             if (xTaskGetTickCount() - last_print >= pdMS_TO_TICKS(1000)) {
-                
-//                 // If we filled the RAM buffer, slowly dump it to the terminal!
-//                 if (capture_count == CAPTURE_SIZE && !dump_complete) {
-//                     ESP_LOGW(TAG, "--- STARTING SLOW CSV DUMP ---");
-//                     printf("Sample_Index, I, Q\n");
-//                     for(int k = 0; k < CAPTURE_SIZE; k++) {
-//                         printf("%d, %d, %d\n", k, capture_i[k], capture_q[k]);
-                        
-//                         // Feed the Watchdog every 50 lines so the chip doesn't crash!
-//                         if (k % 50 == 0) vTaskDelay(pdMS_TO_TICKS(10));
-//                     }
-//                     printf("--- END OF CAPTURE ---\n");
-//                     dump_complete = true;
-//                 } 
-//                 else if (!dump_complete) {
-//                     // Normal Telemetry while waiting
-//                     ESP_LOGI(TAG, "I2S: %lu KB/s | State: WAITING | Live Swing: Min=%03d, Max=%03d", 
-//                                 bytes_processed / 1024, heartbeat_min, heartbeat_max);
-//                 }
-                
-//                 bytes_processed = 0;
-//                 heartbeat_min = 255;
-//                 heartbeat_max = 0;
-//                 last_print = xTaskGetTickCount();
-//             }
-//         }
-//     }
-// }
-
-// -----------------------------------
-// #################################################
-// dsp_i2s_task: PRODUCTION MODE (SILENT STREAMING)
-// #################################################
-static void dsp_i2s_task(void *arg) {
-    ESP_LOGI(TAG, "Initializing Hardware FIR Decimator...");
-    
-    // Initialize the ESP-DSP FIR decimation structures
-    dsps_fird_init_f32(&fir_state_i, fir_coeffs, delay_line_i, FIR_TAPS, DECIMATION_FACTOR);
-    dsps_fird_init_f32(&fir_state_q, fir_coeffs, delay_line_q, FIR_TAPS, DECIMATION_FACTOR);
-
-    ESP_LOGI(TAG, "FIR Decimator Online. Streaming pristine baseband to I2S...");
-    
-    usb_transfer_t *transfer;
-    uint8_t *decimated_buffer = malloc(SDR_BULK_BUFFER_SIZE / 4);
-    
-    uint32_t bytes_processed = 0;
-    TickType_t last_print = xTaskGetTickCount();
-
-    /* Post-decimation I swing on wire (antenna A/B tests — compare with RMS below). */
-    uint8_t local_min = 255;
-    uint8_t local_max = 0;
-
-    /*
-     * RMS of centered USB IQ (before FIR). Use float accumulators only — promoting to double
-     * in the hot loop triggers soft-float paths on RISC-V and starves CPU1 IDLE (task WDT).
-     */
-    float sum_sq_i = 0.f;
-    float sum_sq_q = 0.f;
-    uint32_t rms_pair_count = 0;
-
-    uint32_t overflow_snap_prev = 0;
-
-    while (1) {
-        if (xQueueReceive(bucket_queue, &transfer, portMAX_DELAY)) {
-            uint8_t *raw_data = transfer->data_buffer;
-            int raw_len = transfer->actual_num_bytes;
-            
-            // CRITICAL FIX: Ensure input pairs are a perfect multiple of the decimation factor (4).
-            // Using bitwise AND (~3) chops off any loose, fragmented bytes at the end of the bucket.
-            int num_input_pairs = (raw_len / 2) & ~3;
-            int num_output_pairs = num_input_pairs / DECIMATION_FACTOR;
-
-            if (num_output_pairs <= 0) {
-                usb_host_transfer_submit(transfer);
-                taskYIELD();
-                continue;
-            }
-
-            // 1. SPLIT & FLOAT: Separate the interleaved 8-bit data and center it around 0.0
-            for (int k = 0; k < num_input_pairs; k++) {
-                float vi = (float)raw_data[k * 2] - 128.0f;
-                float vq = (float)raw_data[(k * 2) + 1] - 128.0f;
-                input_i_f32[k] = vi;
-                input_q_f32[k] = vq;
-                sum_sq_i += vi * vi;
-                sum_sq_q += vq * vq;
-            }
-            rms_pair_count += (uint32_t)num_input_pairs;
-
-            // 2. HARDWARE FILTER & DECIMATE:
-            // Pass num_output_pairs so the vector unit stays strictly inside its memory bounds!
-            dsps_fird_f32(&fir_state_i, input_i_f32, output_i_f32, num_output_pairs);
-            dsps_fird_f32(&fir_state_q, input_q_f32, output_q_f32, num_output_pairs);
-
-            // 3. RE-PACK & CLAMP: Convert the floats back to 8-bit interleaved for the I2S hardware
-            int out_idx = 0;
-
-            for (int k = 0; k < num_output_pairs; k++) {
-                float i_val_f = output_i_f32[k] + 128.0f;
-                float q_val_f = output_q_f32[k] + 128.0f;
-
-                // Safety clamp to prevent hardware overflow just in case the math peaks hard
-                if (i_val_f > 255.0f) i_val_f = 255.0f;
-                if (i_val_f < 0.0f) i_val_f = 0.0f;
-                if (q_val_f > 255.0f) q_val_f = 255.0f;
-                if (q_val_f < 0.0f) q_val_f = 0.0f;
-
-                uint8_t i_val = (uint8_t)i_val_f;
-                uint8_t q_val = (uint8_t)q_val_f;
-
-                decimated_buffer[out_idx++] = i_val;
-                decimated_buffer[out_idx++] = q_val;
-
-                // Track the swing of the cleanly filtered data
-                if (i_val < local_min) local_min = i_val;
-                if (i_val > local_max) local_max = i_val;
-            }
-
-            // 4. Send the pristine baseband to the I2S Hardware
-            size_t written = 0;
-            i2s_channel_write(tx_handle, decimated_buffer, out_idx, &written, portMAX_DELAY);
-            bytes_processed += written; 
-
-            // 5. Hand the bucket back to USB immediately
-            usb_host_transfer_submit(transfer);
-
-            /* Let the scheduler run IDLE on this core so the default task WDT stays quiet. */
-            taskYIELD();
-
-            // 6. Quiet 1-Second Telemetry Heartbeat
-            if (xTaskGetTickCount() - last_print >= pdMS_TO_TICKS(1000)) {
-                float rms_i = 0.f;
-                float rms_q = 0.f;
-                if (rms_pair_count > 0) {
-                    rms_i = sqrtf(sum_sq_i / (float)rms_pair_count);
-                    rms_q = sqrtf(sum_sq_q / (float)rms_pair_count);
-                }
-                uint32_t ov = ringbuf_overflows;
-                uint32_t ov_delta = ov - overflow_snap_prev;
-                overflow_snap_prev = ov;
-
-                ESP_LOGI(TAG,
-                         "I2S %lu KB/s | decim IQ [%u,%u] | USB RMS I=%.1f Q=%.1f (pairs=%lu) | q_ovf/s=%lu total=%lu",
-                         (unsigned long)(bytes_processed / 1024),
-                         (unsigned)local_min, (unsigned)local_max,
-                         rms_i, rms_q,
-                         (unsigned long)rms_pair_count,
-                         (unsigned long)ov_delta,
-                         (unsigned long)ov);
-
-                bytes_processed = 0;
-                local_min = 255;
-                local_max = 0;
-                sum_sq_i = sum_sq_q = 0.f;
-                rms_pair_count = 0;
-                last_print = xTaskGetTickCount();
-            }
+        if (tid != 0x69) {
+            ESP_LOGW(TAG, "tuner id 0x%02x (expected R820T2 0x69)", tid);
+            continue;
         }
+
+        if (init_tuner_regs(dev_hdl) != ESP_OK || tuner_auto_gain(dev_hdl) != ESP_OK)
+            continue;
+
+        rtl_set_sample_rate(dev_hdl, SDR_USB_IQ_RATE_HZ);
+        tune_fm_band(dev_hdl);
+        set_ddc_nco(dev_hdl);
+
+        if (start_bulk(dev_hdl) != ESP_OK) {
+            ESP_LOGE(TAG, "bulk start failed");
+            continue;
+        }
+
+        ESP_LOGI(TAG, "USB %lu Hz -> decim x%u -> I2S %u Hz IQ", (unsigned long)SDR_USB_IQ_RATE_HZ,
+                 (unsigned)DECIMATION_FACTOR, (unsigned)IQ_RATE_TO_FPGA);
+        /* USB stream persists; blocks here until unplug + replug emits another NEW_DEV (+ queue send). */
     }
 }
 
-// #################################################
-// PRIMITIVE DECIMATION I2S SENDING ################
-// #################################################
-
-// WORKING VERSION WITH PRIMITIVE DECIMATION
-// #################################################
-// dsp_i2s_task: PRODUCTION MODE (SILENT STREAMING)#
-// #################################################
-// static void dsp_i2s_task(void *arg) {
-//     ESP_LOGI(TAG, "Production DSP Task started - Streaming straight to I2S...");
-    
-//     usb_transfer_t *transfer;
-//     uint8_t *decimated_buffer = malloc(SDR_BULK_BUFFER_SIZE / 4);
-    
-//     uint32_t bytes_processed = 0;
-//     TickType_t last_print = xTaskGetTickCount();
-
-//     uint8_t local_min = 255;
-//     uint8_t local_max = 0;
-
-//     while (1) {
-//         if (xQueueReceive(bucket_queue, &transfer, portMAX_DELAY)) {
-//             uint8_t *raw_data = transfer->data_buffer;
-//             int raw_len = transfer->actual_num_bytes;
-//             int out_idx = 0;
-
-//             // 1. Process and Decimate (4x)
-//             for (int i = 0; i < raw_len; i += 8) {
-//                 uint8_t i_val = raw_data[i];
-//                 uint8_t q_val = raw_data[i + 1];
-                
-//                 decimated_buffer[out_idx++] = i_val;
-//                 decimated_buffer[out_idx++] = q_val;
-
-//                 // Track the swing so you can make sure the antenna is still connected
-//                 if (i_val < local_min) local_min = i_val;
-//                 if (i_val > local_max) local_max = i_val;
-//             }
-
-//             // 2. Push directly to I2S Hardware
-//             size_t written = 0;
-//             i2s_channel_write(tx_handle, decimated_buffer, out_idx, &written, portMAX_DELAY);
-//             bytes_processed += written; 
-
-//             // 3. Hand the bucket back to USB immediately
-//             usb_host_transfer_submit(transfer);
-
-//             // 4. Quiet 1-Second Telemetry Heartbeat
-//             if (xTaskGetTickCount() - last_print >= pdMS_TO_TICKS(1000)) {
-                
-//                 ESP_LOGI(TAG, "I2S OUT: %lu KB/s | Live Swing: Min=%03d, Max=%03d", 
-//                             bytes_processed / 1024, local_min, local_max);
-                
-//                 // Reset trackers for the next second
-//                 bytes_processed = 0;
-//                 local_min = 255;
-//                 local_max = 0;
-//                 last_print = xTaskGetTickCount();
-//             }
-//         }
-//     }
-// }
-
-// Primitive Decimation technique (Capture samples)
-// ##################################################
-// dsp_i2s_task: SMART TRIGGER + CONTINUOUS CAPTURE #
-// ##################################################
-// static void dsp_i2s_task(void *arg) {
-//     ESP_LOGI(TAG, "DSP Task started - Waiting for Signal Swing...");
-    
-//     usb_transfer_t *transfer;
-//     uint8_t *decimated_buffer = malloc(SDR_BULK_BUFFER_SIZE / 4);
-    
-//     static bool csv_done = false;
-//     static bool signal_found = false;
-    
-//     // NEW: Trackers for continuous accumulation
-//     static int samples_saved = 0; 
-//     const int TARGET_SAMPLES = 1000;
-
-//     uint32_t bytes_processed = 0;
-//     TickType_t last_print = xTaskGetTickCount();
-
-//     uint8_t heartbeat_min = 255;
-//     uint8_t heartbeat_max = 0;
-
-//     while (1) {
-//         if (xQueueReceive(bucket_queue, &transfer, portMAX_DELAY)) {
-//             uint8_t *raw_data = transfer->data_buffer;
-//             int raw_len = transfer->actual_num_bytes;
-//             int out_idx = 0;
-
-//             // 1. THE SMART TRIGGER
-//             if (!signal_found) {
-//                 for (int i = 0; i < raw_len; i += 8) {
-//                     if (raw_data[i] > 132 || raw_data[i] < 123) {
-//                         signal_found = true;
-//                         ESP_LOGW(TAG, "SIGNAL DETECTED! Starting continuous capture...");
-//                         printf("Sample_Index, I, Q\n"); // Print header once
-//                         break; 
-//                     }
-//                 }
-//             }
-
-//             // 2. Process, Decimate, and Track
-//             for (int i = 0; i < raw_len; i += 8) {
-//                 uint8_t i_val = raw_data[i];
-//                 uint8_t q_val = raw_data[i + 1];
-                
-//                 decimated_buffer[out_idx++] = i_val;
-//                 decimated_buffer[out_idx++] = q_val;
-
-//                 if (i_val < heartbeat_min) heartbeat_min = i_val;
-//                 if (i_val > heartbeat_max) heartbeat_max = i_val;
-
-//                 // --- CONTINUOUS CSV EXPORT LOGIC ---
-//                 // If we found the signal, keep printing until we hit the target!
-//                 if (signal_found && !csv_done) {
-//                     printf("%d, %d, %d\n", samples_saved, i_val, q_val);
-//                     samples_saved++;
-
-//                     if (samples_saved >= TARGET_SAMPLES) {
-//                         printf("--- END OF CAPTURE (%d Samples) ---\n", samples_saved);
-//                         csv_done = true; 
-//                     }
-//                 }
-//             }
-
-//             // 3. Keep I2S hardware happy
-//             size_t written = 0;
-//             i2s_channel_write(tx_handle, decimated_buffer, out_idx, &written, portMAX_DELAY);
-//             bytes_processed += written; 
-
-//             // 4. Hand the bucket back to USB
-//             usb_host_transfer_submit(transfer);
-
-//             // 5. HEARTBEAT
-//             if (xTaskGetTickCount() - last_print >= pdMS_TO_TICKS(1000)) {
-                
-//                 char *state_str = "WAITING";
-//                 if (signal_found && !csv_done) state_str = "CAPTURING";
-//                 if (csv_done) state_str = "DONE";
-
-//                 ESP_LOGI(TAG, "I2S: %lu KB/s | State: %s | Live Swing: Min=%03d, Max=%03d", 
-//                             bytes_processed / 1024, 
-//                             state_str,
-//                             heartbeat_min, heartbeat_max);
-                
-//                 bytes_processed = 0;
-//                 heartbeat_min = 255;
-//                 heartbeat_max = 0;
-//                 last_print = xTaskGetTickCount();
-//             }
-//         }
-//     }
-// }
-
-// #################################################
-// END PRIMITIVE DECIMATION I2S SENDING ############
-// #################################################
-
-// #################################################################
-// END USB STUFF ###################################################
-// #################################################################
-// ==========================================
-
-void app_main(void) {
-    // Initialize our synchronization objects
+void app_main(void)
+{
     sdr_queue = xQueueCreate(1, sizeof(usb_device_handle_t));
     transfer_sem = xSemaphoreCreateBinary();
-
-    // Create a queue that holds exactly NUM_BULK_TRANSFERS pointers
     bucket_queue = xQueueCreate(NUM_BULK_TRANSFERS, sizeof(usb_transfer_t *));
-    if (bucket_queue == NULL) {
-        ESP_LOGE(TAG, "Failed to create bucket queue!");
-        return;
-    }
-    
-    // initialize I2S
-    init_i2s_hardware();
+    ESP_ERROR_CHECK((bucket_queue && sdr_queue && transfer_sem) ? ESP_OK : ESP_ERR_NO_MEM);
 
-    ESP_LOGI(TAG, "Starting USB Host Controller...");
+    init_i2s();
 
-    usb_host_config_t host_config = {
+    esp_err_t err = usb_host_install(&(usb_host_config_t){
         .skip_phy_setup = false,
         .intr_flags = ESP_INTR_FLAG_LEVEL1,
-    };
-    ESP_ERROR_CHECK(usb_host_install(&host_config));
+    });
+    ESP_ERROR_CHECK(err);
 
     xTaskCreatePinnedToCore(usb_lib_task, "usb_lib", 4096, NULL, 10, NULL, 0);
-    
-    // Start our new SDR Control Task
-    xTaskCreate(sdr_control_task, "sdr_ctrl", 4096, NULL, 5, NULL);
-
-    usb_host_client_config_t client_config = {
-        .is_synchronous = false,
-        .max_num_event_msg = 5,
-        .async = {
-            .client_event_callback = client_event_cb,
-            .callback_arg = NULL,
+    xTaskCreate(sdr_boot_task, "sdr_boot", 4096, NULL, 8, NULL);
+    ESP_ERROR_CHECK(usb_host_client_register(
+        &(usb_host_client_config_t){
+            .is_synchronous = false,
+            .max_num_event_msg = 5,
+            .async =
+                {
+                    .client_event_callback = on_client_event,
+                },
         },
-    };
-    ESP_ERROR_CHECK(usb_host_client_register(&client_config, &client_hdl));
+        &client_hdl));
 
-    ESP_LOGI(TAG, "Setup complete. Waiting for RTL-SDR to be plugged in...");
+    xTaskCreatePinnedToCore(dsp_task, "dsp_i2s", 4096, NULL, 9, NULL, 1);
 
-    // 6. Start the DSP/I2S Task on Core 1
-    xTaskCreatePinnedToCore(dsp_i2s_task, "dsp_i2s", 8192, NULL, 5, NULL, 1);
-
-    while (1) {
+    for (;;)
         usb_host_client_handle_events(client_hdl, portMAX_DELAY);
-    }
-    
 }
