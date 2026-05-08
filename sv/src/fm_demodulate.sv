@@ -18,8 +18,7 @@ import types::*;
     logic signed [23:0] denom;
 
     logic div_done;
-    logic signed [55:0] div_result;
-    // logic signed [31:0] div_result;
+    logic signed [31:0] div_result;
     logic signed [49:0] scaled_result;
 
     always_ff @(posedge clk, negedge n_rst) begin : latchLPF
@@ -49,8 +48,7 @@ import types::*;
             // find the numerator
             num_i = curr_i * prev_q;
             num_q = curr_q * prev_i;
-            num_sub = num_i - num_q;
-            // num_sub = num_q - num_i;
+            num_sub = num_q - num_i;
             num = num_sub[36:5];
 
             // find the denominator
@@ -73,14 +71,12 @@ import types::*;
         .s_axis_dividend_tready(),          // output wire s_axis_dividend_tready
         .s_axis_dividend_tdata(num),        // input wire [31 : 0] s_axis_dividend_tdata
         .m_axis_dout_tvalid(div_done),      // output wire m_axis_dout_tvalid
-        .m_axis_dout_tdata(div_result)      // output wire [55 : 0] m_axis_dout_tdata
+        .m_axis_dout_tdata(div_result)      // output wire [31 : 0] m_axis_dout_tdata
     );
 
     always_comb begin : scaleOutput
         if (div_done) begin
-            // scaled_result = div_result * SCALE_OUT;
-            // fmif.demod_sample = scaled_result[27:10];
-            scaled_result = div_result[55:24] * SCALE_OUT;
+            scaled_result = div_result * SCALE_OUT;
             fmif.demod_sample = scaled_result[27:10];
             fmif.demod_valid = 1'b1;
         end else begin
