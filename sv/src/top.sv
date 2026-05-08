@@ -1,6 +1,7 @@
 
 `timescale 1ns / 10ps
 `include "../include/types.sv"
+`include "../include/rf_cdc_if.vh"
 `include "../include/dc_offset_if.vh"
 `include "../include/lpf_wrapper_if.vh"
 `include "../include/fm_demodulate_if.vh"
@@ -87,17 +88,15 @@ import types::*;
     localparam int PHASE_BITS_HIGH = $clog2(TABLE_SIZE_HIGH);
     localparam int PHASE_BITS_LOW  = $clog2(TABLE_SIZE_LOW);
     
-    // Selector oscillation: switches every ~5 million cycles (~50ms at 100MHz)
-    localparam int SELECTOR_DIV = 32'd5_000_000;
+    // Selector oscillation: switches every ~5 million cycles (~500ms at 100MHz)
+    localparam int SELECTOR_DIV = 32'd50_000_000;
 
     // Precomputed sine lookup tables
     logic [SAMPLE_DW-1:0] sin_table_high [0:219];
     logic [SAMPLE_DW-1:0] sin_table_low  [0:439];
 
-    logic [PHASE_BITS-1:0] phase = 0;
-
-    // Initialize high-frequency sine lookup table (220 samples)
     // Initialize high-frequency sine table (220 samples, ~1kHz)
+    // and low-frequency table (440 samples, ~500Hz) in one block to avoid init-order race
     initial begin
         sin_table_high[0]   = 8'd128; sin_table_high[1]   = 8'd131; sin_table_high[2]   = 8'd135; sin_table_high[3]   = 8'd138;
         sin_table_high[4]   = 8'd142; sin_table_high[5]   = 8'd145; sin_table_high[6]   = 8'd149; sin_table_high[7]   = 8'd152;
@@ -154,10 +153,7 @@ import types::*;
         sin_table_high[208] = 8'd242; sin_table_high[209] = 8'd239; sin_table_high[210] = 8'd236; sin_table_high[211] = 8'd233;
         sin_table_high[212] = 8'd230; sin_table_high[213] = 8'd227; sin_table_high[214] = 8'd224; sin_table_high[215] = 8'd220;
         sin_table_high[216] = 8'd217; sin_table_high[217] = 8'd214; sin_table_high[218] = 8'd211; sin_table_high[219] = 8'd208;
-    end
-
-    // Initialize low-frequency sine table (440 samples, ~500Hz - each high value repeated twice)
-    initial begin
+        // Derive low-frequency table: duplicate each high sample to halve the frequency (~500Hz)
         for (int i = 0; i < 220; i++) begin
             sin_table_low[2*i]     = sin_table_high[i];
             sin_table_low[2*i + 1] = sin_table_high[i];
