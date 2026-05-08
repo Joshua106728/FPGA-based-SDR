@@ -48,7 +48,8 @@ import types::*;
             // find the numerator
             num_i = curr_i * prev_q;
             num_q = curr_q * prev_i;
-            num_sub = num_q - num_i;
+            num_sub = num_i - num_q;
+            // num_sub = num_q - num_i;
             num = num_sub[36:5];
 
             // find the denominator
@@ -61,7 +62,7 @@ import types::*;
         end
     end
 
-    div your_instance_name (
+    div u_div (
         .aclk(clk),                         // input wire aclk
         .aresetn(n_rst),                    // input wire aresetn
         .s_axis_divisor_tvalid(div_val),    // input wire s_axis_divisor_tvalid
