@@ -416,7 +416,9 @@ esp_err_t rtlsdr_init_baseband_real(usb_device_handle_t dev_hdl) {
     rtlsdr_demod_write_reg(dev_hdl, 1, 0x01, 0x10);
 
     // 4. THE MAGIC SWITCH: Enable SDR Mode & Disable DAGC
-    rtlsdr_demod_write_reg(dev_hdl, 0, 0x19, 0x05);
+    // 0x05 = SDR mode ON + DC correction ON (correction loop kills the FM carrier within ~16ms)
+    // 0x04 = SDR mode ON + DC correction OFF (try this to stop the loop from zeroing the signal)
+    rtlsdr_demod_write_reg(dev_hdl, 0, 0x19, 0x04);
 
     // 5. Default ADC datapath 
     rtlsdr_demod_write_reg(dev_hdl, 0, 0x06, 0x80);

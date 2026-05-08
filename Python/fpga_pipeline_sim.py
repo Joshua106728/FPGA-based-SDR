@@ -83,7 +83,7 @@ def save_stage_csv(data: np.ndarray, path: str, label: str) -> None:
 def load_csv(paths: list[str]) -> tuple[np.ndarray, np.ndarray]:
     all_i, all_q = [], []
     for path in paths:
-        df = pd.read_csv(path, skipinitialspace=True)
+        df = pd.read_csv(path, skipinitialspace=True, encoding='utf-16')
         all_i.append(df['I'].to_numpy(dtype=np.uint8))
         all_q.append(df['Q'].to_numpy(dtype=np.uint8))
         print(f"[Load] {path}: {len(df):,} samples")
