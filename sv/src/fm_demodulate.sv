@@ -18,7 +18,8 @@ import types::*;
     logic signed [23:0] denom;
 
     logic div_done;
-    logic signed [31:0] div_result;
+    logic signed [55:0] div_result;
+    // logic signed [31:0] div_result;
     logic signed [49:0] scaled_result;
 
     always_ff @(posedge clk, negedge n_rst) begin : latchLPF
