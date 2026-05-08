@@ -121,8 +121,13 @@ static SemaphoreHandle_t transfer_sem;
 
 // R820T2 initialization array (Registers 0x05 through 0x1F)
 // We keep this global so we can modify specific bits later (like changing frequencies)
+// Reg 0x0A (index 5): IF filter capacitor bank  — 0x40 = default wide
+// Reg 0x0B (index 6): IF filter bandwidth       — 0xD6 = ~3.5 MHz wide (librtlsdr default)
+//                                                  0xE4 = ~1.5 MHz (better SNR for 1 MSPS FM)
+// Narrowing the IF BW from 3.5 MHz to 1.5 MHz rejects adjacent channels & out-of-band noise
+// that would otherwise fold into our 1 MSPS ADC window.
 static uint8_t r82xx_shadow_regs[27] = {
-    0x83, 0x32, 0x75, 0xC0, 0x40, 0xD6, 0x6C, 0xF5, // 0x05 to 0x0C
+    0x83, 0x32, 0x75, 0xC0, 0x40, 0xE4, 0x6C, 0xF5, // 0x05 to 0x0C  (0x0B: 0xD6->0xE4 narrows IF BW)
     0x63, 0x75, 0x68, 0x6C, 0x83, 0x80, 0x00, 0x0F, // 0x0D to 0x14
     0x00, 0xC0, 0x30, 0x48, 0xCC, 0x60, 0x00, 0x54, // 0x15 to 0x1C
     0xAE, 0x4A, 0xC0                                // 0x1D to 0x1F
@@ -478,6 +483,20 @@ esp_err_t rtlsdr_init_tuner(usb_device_handle_t dev_hdl) {
         }
     }
 
+    // After blasting the init array, lower the R820T2's internal HP filter corner.
+    // In zero-IF mode the IF sits at/near DC; the default HP corner (reg 0x07 bit 0 = 1)
+    // can attenuate the baseband signal.  Clearing bit 0 moves the corner as low as possible.
+    if (err == ESP_OK) {
+        err = rtlsdr_set_i2c_repeater(dev_hdl, true);
+        if (err == ESP_OK) {
+            uint8_t reg07 = r82xx_shadow_regs[0x07 - 0x05];
+            reg07 &= ~0x01; // Clear bit 0: lower HP corner for zero-IF
+            err = rtlsdr_i2c_write_reg(dev_hdl, 0x34, 0x07, reg07);
+            r82xx_shadow_regs[0x07 - 0x05] = reg07;
+        }
+        rtlsdr_set_i2c_repeater(dev_hdl, false);
+    }
+
     // 3. Close I2C gate
     rtlsdr_set_i2c_repeater(dev_hdl, false);
 
@@ -486,7 +505,7 @@ esp_err_t rtlsdr_init_tuner(usb_device_handle_t dev_hdl) {
         ESP_LOGI(TAG, "SUCCESS! Tuner Initialized to Default State");
         ESP_LOGI(TAG, "===========================================");
     }
-    
+
     return err;
 }
 
