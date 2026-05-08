@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -18,14 +19,25 @@
 // ESP FIR FILTER SINCE WE ARE DOING DECIMATION GOING FROM 1 MSPS -> 250 KSPS #
 // ############################################################################
 // --- ESP-DSP FIR DECIMATION SETUP ---
-#define FIR_TAPS 15
+/*
+ * ESP32-P4 dsps_fird_f32_arp4 assumes tap count N suits the vector kernel (use multiple of 4).
+ * Pad symmetric 15-tap kernel with a trailing 0 coefficient → identical response, N=16.
+ */
+#define FIR_TAPS 16
 #define DECIMATION_FACTOR 4
+
+/** RTL2832 USB IQ sample rate before ESP FIR decimation (Hz). */
+#define SDR_USB_IQ_RATE_HZ 1000000u
+
+/** Effective IQ rate to FPGA after DECIMATION_FACTOR (Hz). */
+#define SDR_IQ_RATE_AFTER_DECIM (SDR_USB_IQ_RATE_HZ / DECIMATION_FACTOR)
 
 // CRITICAL: ALIGN EVERYTHING TO 16 BYTES FOR RISC-V VECTOR INSTRUCTIONS
 __attribute__((aligned(16))) static float fir_coeffs[FIR_TAPS] = {
-    -0.0101f, -0.0175f, -0.0039f,  0.0381f,  0.1042f, 
-     0.1741f,  0.2227f,  0.2393f,  0.2227f,  0.1741f, 
-     0.1042f,  0.0381f, -0.0039f, -0.0175f, -0.0101f
+    -0.0101f, -0.0175f, -0.0039f,  0.0381f,  0.1042f,
+     0.1741f,  0.2227f,  0.2393f,  0.2227f,  0.1741f,
+     0.1042f,  0.0381f, -0.0039f, -0.0175f, -0.0101f,
+     0.0f
 };
 
 static fir_f32_t fir_state_i;
@@ -58,10 +70,12 @@ static i2s_chan_handle_t tx_handle;    // This holds the I2S hardware handle
 #define I2S_BCK_GPIO     5   // Bit Clock    (was 46 — strapping pin on ESP32-S3, limits output to ~1V)
 #define I2S_DOUT_GPIO    6   // Data Out
 
-#define SDR_SAMPLE_RATE  250000 // 250 kHz
+/* Stereo IQ word rate to FPGA (must match USB rate / DECIMATION_FACTOR). */
+#define SDR_SAMPLE_RATE SDR_IQ_RATE_AFTER_DECIM
+
 void init_i2s_hardware(void)
 {
-    ESP_LOGI(TAG, "Initializing 8-Bit I2S Pipeline...");
+    ESP_LOGI(TAG, "Initializing 8-Bit I2S Pipeline at %u Hz (stereo IQ)...", (unsigned)SDR_SAMPLE_RATE);
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_AUTO, I2S_ROLE_MASTER);
     
     // Using your exact DMA settings for stability
@@ -70,7 +84,7 @@ void init_i2s_hardware(void)
     ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, &tx_handle, NULL));
 
     i2s_std_config_t std_cfg = {
-        .clk_cfg  = I2S_STD_CLK_DEFAULT_CONFIG(SDR_SAMPLE_RATE), // 250 kHz
+        .clk_cfg  = I2S_STD_CLK_DEFAULT_CONFIG(SDR_SAMPLE_RATE),
         .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_8BIT, I2S_SLOT_MODE_STEREO),
         .gpio_cfg = {
             .mclk = I2S_GPIO_UNUSED, 
@@ -305,11 +319,17 @@ esp_err_t rtlsdr_demod_read_reg(usb_device_handle_t dev_hdl, uint8_t page, uint1
     return err;
 }
 
-esp_err_t rtlsdr_set_sample_rate(usb_device_handle_t dev_hdl, uint32_t samp_rate) {
-    uint32_t rsamp_ratio = (uint32_t)((28800000ULL << 22) / samp_rate);
-    rsamp_ratio &= 0x0FFFFFFC; 
+/** RTL2832 crystal-based rsamp_ratio; must match rtlsdr_set_sample_rate write/readback. */
+static uint32_t rtlsdr_rsamp_ratio_hz(uint32_t samp_rate_hz)
+{
+    uint32_t r = (uint32_t)((28800000ULL << 22) / samp_rate_hz);
+    return r & 0x0FFFFFFC;
+}
 
-    ESP_LOGI(TAG, "Setting sample rate to %lu Hz (Ratio: 0x%08lX)", samp_rate, rsamp_ratio);
+esp_err_t rtlsdr_set_sample_rate(usb_device_handle_t dev_hdl, uint32_t samp_rate) {
+    uint32_t rsamp_ratio = rtlsdr_rsamp_ratio_hz(samp_rate);
+
+    ESP_LOGI(TAG, "Setting sample rate to %lu Hz (rsamp_ratio: 0x%08lX)", samp_rate, rsamp_ratio);
 
     // FIX: Use the specific Demodulator 16-bit write function to Page 1
     esp_err_t err = rtlsdr_demod_write_reg_16(dev_hdl, 1, 0x9f, (uint16_t)(rsamp_ratio >> 16));
@@ -416,9 +436,7 @@ esp_err_t rtlsdr_init_baseband_real(usb_device_handle_t dev_hdl) {
     rtlsdr_demod_write_reg(dev_hdl, 1, 0x01, 0x10);
 
     // 4. THE MAGIC SWITCH: Enable SDR Mode & Disable DAGC
-    // 0x05 = SDR mode ON + DC correction ON (correction loop kills the FM carrier within ~16ms)
-    // 0x04 = SDR mode ON + DC correction OFF (try this to stop the loop from zeroing the signal)
-    rtlsdr_demod_write_reg(dev_hdl, 0, 0x19, 0x04);
+    rtlsdr_demod_write_reg(dev_hdl, 0, 0x19, 0x05);
 
     // 5. Default ADC datapath 
     rtlsdr_demod_write_reg(dev_hdl, 0, 0x06, 0x80);
@@ -494,7 +512,7 @@ esp_err_t rtlsdr_tune_105_3mhz_mock(usb_device_handle_t dev_hdl) {
     
     rtlsdr_set_i2c_repeater(dev_hdl, false);
 
-    ESP_LOGI(TAG, "Tuner Reg 0x00 (Status): 0x%02X", lock_status);
+    ESP_LOGI(TAG, "Tuner Reg 0x02 (status byte): 0x%02X", lock_status);
     
     // Verify Bit 6 (0x40) for PLL Lock
     if (lock_status & 0x40) {
@@ -680,35 +698,35 @@ static void sdr_control_task(void *arg) {
             
             if (tuner_id == 0x69) {
                 rtlsdr_init_tuner(dev_hdl);
-                
-                // raise the gain
-                rtlsdr_set_tuner_manual_gain(dev_hdl);
 
-                // 3. Set the Baseband Sample Rate to 250 kSPS
-                ESP_LOGI(TAG, "Setting Hardware Sample Rate to 1 MSPS...");
-                rtlsdr_set_sample_rate(dev_hdl, 1000000); // Changed from 250000
-                
-                // 4. Verification Readback
+                /* Auto gain: RF level drops when antenna is removed — easier to validate RF vs noise floor. */
+                rtlsdr_set_tuner_auto_gain(dev_hdl);
+
+                ESP_LOGI(TAG, "RTL IQ rate: %u Hz SPS -> ESP decimate x%u -> I2S IQ ~%u Hz (pairs/s)",
+                         SDR_USB_IQ_RATE_HZ, DECIMATION_FACTOR, SDR_IQ_RATE_AFTER_DECIM);
+
+                rtlsdr_set_sample_rate(dev_hdl, SDR_USB_IQ_RATE_HZ);
+
+                uint32_t expected_ratio = rtlsdr_rsamp_ratio_hz(SDR_USB_IQ_RATE_HZ);
+
                 uint8_t read_buf[2];
                 uint16_t high_val, low_val;
-                
-                // FIX: Use Demodulator Read on Page 1
+
                 rtlsdr_demod_read_reg(dev_hdl, 1, 0x9f, read_buf, 2);
                 high_val = (read_buf[0] << 8) | read_buf[1];
-                
+
                 rtlsdr_demod_read_reg(dev_hdl, 1, 0xa1, read_buf, 2);
                 low_val = (read_buf[0] << 8) | read_buf[1];
-                
-                uint32_t verified_ratio = (high_val << 16) | low_val;
-                
-                ESP_LOGI(TAG, "Verified rsamp_ratio Readback: 0x%08lX", verified_ratio);
-                
-                if (verified_ratio == 0x0CCCCCCC) {
-                    ESP_LOGI(TAG, "===========================================");
-                    ESP_LOGI(TAG, "SUCCESS! 250 kSPS Sample Rate Confirmed!");
-                    ESP_LOGI(TAG, "===========================================");
+
+                uint32_t verified_ratio = ((uint32_t)high_val << 16) | low_val;
+
+                ESP_LOGI(TAG, "rsamp_ratio readback: 0x%08lX (expected 0x%08lX for %u Hz)",
+                         (unsigned long)verified_ratio, (unsigned long)expected_ratio, SDR_USB_IQ_RATE_HZ);
+
+                if (verified_ratio == expected_ratio) {
+                    ESP_LOGI(TAG, "Sample rate registers match computed rsamp_ratio.");
                 } else {
-                    ESP_LOGE(TAG, "Sample rate ratio mismatch! Expected 0x0CCCCCCC got 0x%08lX", verified_ratio);
+                    ESP_LOGW(TAG, "rsamp_ratio readback differs — tuner may still work; check tuning if IQ looks wrong.");
                 }
 
                 // --- NEW: Step 7 - Tuner PLL Lock Test ---
@@ -936,9 +954,19 @@ static void dsp_i2s_task(void *arg) {
     uint32_t bytes_processed = 0;
     TickType_t last_print = xTaskGetTickCount();
 
-    // Trackers to monitor the live RF swing
+    /* Post-decimation I swing on wire (antenna A/B tests — compare with RMS below). */
     uint8_t local_min = 255;
     uint8_t local_max = 0;
+
+    /*
+     * RMS of centered USB IQ (before FIR). Use float accumulators only — promoting to double
+     * in the hot loop triggers soft-float paths on RISC-V and starves CPU1 IDLE (task WDT).
+     */
+    float sum_sq_i = 0.f;
+    float sum_sq_q = 0.f;
+    uint32_t rms_pair_count = 0;
+
+    uint32_t overflow_snap_prev = 0;
 
     while (1) {
         if (xQueueReceive(bucket_queue, &transfer, portMAX_DELAY)) {
@@ -947,19 +975,27 @@ static void dsp_i2s_task(void *arg) {
             
             // CRITICAL FIX: Ensure input pairs are a perfect multiple of the decimation factor (4).
             // Using bitwise AND (~3) chops off any loose, fragmented bytes at the end of the bucket.
-            int num_input_pairs = (raw_len / 2) & ~3; 
+            int num_input_pairs = (raw_len / 2) & ~3;
+            int num_output_pairs = num_input_pairs / DECIMATION_FACTOR;
+
+            if (num_output_pairs <= 0) {
+                usb_host_transfer_submit(transfer);
+                taskYIELD();
+                continue;
+            }
 
             // 1. SPLIT & FLOAT: Separate the interleaved 8-bit data and center it around 0.0
             for (int k = 0; k < num_input_pairs; k++) {
-                input_i_f32[k] = (float)raw_data[k * 2] - 128.0f;
-                input_q_f32[k] = (float)raw_data[(k * 2) + 1] - 128.0f;
+                float vi = (float)raw_data[k * 2] - 128.0f;
+                float vq = (float)raw_data[(k * 2) + 1] - 128.0f;
+                input_i_f32[k] = vi;
+                input_q_f32[k] = vq;
+                sum_sq_i += vi * vi;
+                sum_sq_q += vq * vq;
             }
+            rms_pair_count += (uint32_t)num_input_pairs;
 
-            // --- THE FINAL FIX ---
-            // Calculate the OUTPUT length BEFORE calling the filter!
-            int num_output_pairs = num_input_pairs / DECIMATION_FACTOR;
-
-            // 2. HARDWARE FILTER & DECIMATE: 
+            // 2. HARDWARE FILTER & DECIMATE:
             // Pass num_output_pairs so the vector unit stays strictly inside its memory bounds!
             dsps_fird_f32(&fir_state_i, input_i_f32, output_i_f32, num_output_pairs);
             dsps_fird_f32(&fir_state_q, input_q_f32, output_q_f32, num_output_pairs);
@@ -996,15 +1032,35 @@ static void dsp_i2s_task(void *arg) {
             // 5. Hand the bucket back to USB immediately
             usb_host_transfer_submit(transfer);
 
+            /* Let the scheduler run IDLE on this core so the default task WDT stays quiet. */
+            taskYIELD();
+
             // 6. Quiet 1-Second Telemetry Heartbeat
             if (xTaskGetTickCount() - last_print >= pdMS_TO_TICKS(1000)) {
-                ESP_LOGI(TAG, "I2S OUT: %lu KB/s | FIR ACTIVE | Live Swing: Min=%03d, Max=%03d", 
-                            bytes_processed / 1024, local_min, local_max);
-                
-                // Reset trackers for the next second
+                float rms_i = 0.f;
+                float rms_q = 0.f;
+                if (rms_pair_count > 0) {
+                    rms_i = sqrtf(sum_sq_i / (float)rms_pair_count);
+                    rms_q = sqrtf(sum_sq_q / (float)rms_pair_count);
+                }
+                uint32_t ov = ringbuf_overflows;
+                uint32_t ov_delta = ov - overflow_snap_prev;
+                overflow_snap_prev = ov;
+
+                ESP_LOGI(TAG,
+                         "I2S %lu KB/s | decim IQ [%u,%u] | USB RMS I=%.1f Q=%.1f (pairs=%lu) | q_ovf/s=%lu total=%lu",
+                         (unsigned long)(bytes_processed / 1024),
+                         (unsigned)local_min, (unsigned)local_max,
+                         rms_i, rms_q,
+                         (unsigned long)rms_pair_count,
+                         (unsigned long)ov_delta,
+                         (unsigned long)ov);
+
                 bytes_processed = 0;
                 local_min = 255;
                 local_max = 0;
+                sum_sq_i = sum_sq_q = 0.f;
+                rms_pair_count = 0;
                 last_print = xTaskGetTickCount();
             }
         }
