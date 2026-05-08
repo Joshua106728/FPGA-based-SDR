@@ -19,7 +19,7 @@ import types::*;
     logic signed [23:0] lpf_i_data, lpf_q_data;
 
     low_pass_filter lpf_i (
-        .aresetn(n_rst)
+        .aresetn(n_rst),
         .aclk(clk),                         // input wire aclk
         .s_axis_data_tvalid(i_valid),       // input wire s_axis_data_tvalid
         .s_axis_data_tready(i_ready),       // output wire s_axis_data_tready
@@ -29,7 +29,7 @@ import types::*;
     );
 
     low_pass_filter lpf_q (
-        .aresetn(n_rst)
+        .aresetn(n_rst),
         .aclk(clk),                         // input wire aclk
         .s_axis_data_tvalid(q_valid),       // input wire s_axis_data_tvalid
         .s_axis_data_tready(q_ready),       // output wire s_axis_data_tready
@@ -72,6 +72,5 @@ import types::*;
     assign lpfif.lpf_i     = lpf_i_data[DATA_DW-1:0];
     assign lpfif.lpf_q     = lpf_q_data[DATA_DW-1:0];
     assign lpfif.lpf_valid = lpf_i_valid & lpf_q_valid;
-    assign lpfif.lpf_ready = i_ready & q_ready;
 
 endmodule

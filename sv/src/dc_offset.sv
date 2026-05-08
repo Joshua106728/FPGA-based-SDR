@@ -23,6 +23,12 @@ import types::*;
     always_comb begin : runningMeanLogic
         next_mean_i = mean_i;
         next_mean_q = mean_q;
+        diff_i = '0;
+        diff_q = '0;
+        mean_updated_i = '0;
+        mean_updated_q = '0;
+        corrected_i = '0;
+        corrected_q = '0;
 
         if (dcif.sample_valid) begin
             // 19-bit from 18-bit subtraction

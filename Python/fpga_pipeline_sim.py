@@ -2,97 +2,116 @@
 fpga_pipeline_sim.py
 ====================
 Simulates the full FPGA DSP pipeline in fixed-point integer math,
-matching the SystemVerilog modules exactly, then plays the result
-through your MacBook's speaker.
+matching the SystemVerilog modules as closely as possible, then plays
+the recovered audio.
 
-Pipeline:
-  CSV (uint8 I/Q) → dc_offset → lpf → decimation → fm_demodulate
-                  → de_emphasis → play audio
+Pipeline (matches top.sv exactly):
+  CSV (uint8 I/Q) → dc_offset → lpf_wrapper → fm_demodulate
+                  → decimation → de_emphasis → play audio
+
+Per-stage CSVs are written alongside the input file for direct
+comparison against the fm_receiver.py prototype stage outputs:
+  <stem>_sim_stage1_dc_removed.csv   — integer I/Q  (Q7.10, 18-bit)
+  <stem>_sim_stage2_lpf.csv          — integer I/Q  (18-bit, truncated to 16-bit for FM)
+  <stem>_sim_stage3_demod.csv        — integer mono (16-bit, full SDR rate)
+  <stem>_sim_stage4_decimated.csv    — integer mono (16-bit, audio rate)
+  <stem>_sim_stage5_deemphasis.csv   — integer mono (18-bit, final output)
 
 Usage:
-    python fpga_pipeline_sim.py IQ_DATA_1000_1.csv
-    python fpga_pipeline_sim.py IQ_DATA_1000_1.csv IQ_DATA_1000_2.csv ...
-    python fpga_pipeline_sim.py IQ_DATA_1000_*.csv   (all at once)
-
-Dependencies:
-    python -m pip install numpy scipy sounddevice matplotlib pandas
+    python fpga_pipeline_sim.py ../IQ_Samples/song_stage0_raw_iq.csv
+    python fpga_pipeline_sim.py ../IQ_Samples/song_stage0_raw_iq.csv --no-play
 """
 
 import argparse
+import os
+
 import numpy as np
 import pandas as pd
 from scipy.signal import firwin, lfilter
 import sounddevice as sd
+import soundfile as sf
 import matplotlib.pyplot as plt
-import sys
 
 # ============================================================
-# Constants — must match types.sv and your module parameters
+# Constants — must match types.sv and module parameters
 # ============================================================
-SAMPLE_DW         = 8          # rf_cdc output width (uint8)
-DATA_DW           = 18         # internal FPGA fixed-point width
-FRACTIONAL_BITS   = 10         # Q7.10 format from dc_offset
-RUNNING_SUM_ALPHA = 11         # dc_offset exponential decay shift
+SAMPLE_DW         = 8           # rf_cdc output width (uint8)
+DATA_DW           = 18          # internal FPGA fixed-point width
+FRACTIONAL_BITS   = 10          # Q7.10 from dc_offset
+RUNNING_SUM_ALPHA = 11          # dc_offset exponential decay shift
 
-SDR_SAMPLE_RATE   = 220_500    # Hz — LPF output rate
-DECIM_FACTOR      = 6          # 220500 / 6 = 36750 Hz audio rate
-AUDIO_SAMPLE_RATE = SDR_SAMPLE_RATE // DECIM_FACTOR  # 36750 Hz
+SDR_SAMPLE_RATE   = 250_000     # Hz — sample rate at LPF / FM demod input
+DECIM_FACTOR      = 6           # 250000 / 6 = 41666.67 Hz audio rate
+AUDIO_SAMPLE_RATE = SDR_SAMPLE_RATE // DECIM_FACTOR  # 41666.67 Hz
 
-MAX_FREQ_DEV      = 75_000     # Hz — FM deviation
+MAX_FREQ_DEV = 75_000           # standard FM peak deviation (Hz)
 
-# De-emphasis: alpha = exp(-1 / (75e-6 * 36750))
-# Represented in Q0.16 fixed point
-ALPHA_FP          = 65512      # round(0.999637 * 65536)
-ONE_MINUS_ALPHA   = 65536 - ALPHA_FP  # 24
+# de_emphasis.sv Q0.16 coefficients (tau=75us, fs=36750 Hz)
+# These must match de_emphasis.sv — localparam values
+# ALPHA_FP        = 65518         # round(exp(-1/(75e-6 * 36750)) * 65536)
+# ONE_MINUS_ALPHA = 65536 - ALPHA_FP  # 18
 
-PCM_IN_W          = 18         # i2s_if sample_q18 width
+ALPHA_FP        = 47589
+ONE_MINUS_ALPHA = 17947   # 47589 + 17947 = 65536
+
+PCM_IN_W = 18                   # final output width (i2s_if sample_q18)
+PCM_W = 16
+
+# ============================================================
+# Stage CSV saver — integer format for HDL comparison
+# ============================================================
+def save_stage_csv(data: np.ndarray, path: str, label: str) -> None:
+    """Save a pipeline stage output as integer CSV for HDL comparison."""
+    n = len(data)
+    idx = np.arange(n, dtype=np.int32)
+    if data.ndim == 2:
+        rows = np.column_stack([idx, data])
+        cols = ",".join(f"col{i}" for i in range(data.shape[1]))
+        header = f"Sample_Index,{cols}"
+    else:
+        rows = np.column_stack([idx, data])
+        header = "Sample_Index,Value"
+    np.savetxt(path, rows, fmt="%d", delimiter=",", header=header, comments="")
+    size_kb = os.path.getsize(path) / 1e3
+    print(f"[Stage CSV] {label}: {n:,} samples → '{path}' ({size_kb:.0f} KB)")
 
 
 # ============================================================
 # Stage 1: Load CSV
+# Accepts any CSV with Sample_Index, I, Q columns (uint8 values).
 # ============================================================
 def load_csv(paths: list[str]) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Load one or more CSV files and concatenate their I/Q columns.
-    Matches rf_cdc output: unsigned 8-bit integers.
-    """
     all_i, all_q = [], []
     for path in paths:
         df = pd.read_csv(path, skipinitialspace=True)
         all_i.append(df['I'].to_numpy(dtype=np.uint8))
         all_q.append(df['Q'].to_numpy(dtype=np.uint8))
-        print(f"[Load] {path}: {len(df)} samples")
+        print(f"[Load] {path}: {len(df):,} samples")
     i = np.concatenate(all_i)
     q = np.concatenate(all_q)
-    print(f"[Load] Total: {len(i)} samples")
+    print(f"[Load] Total: {len(i):,} samples")
     return i, q
 
 
 # ============================================================
-# Stage 2: DC Offset removal
-# Matches dc_offset.sv exactly:
-#   - Convert uint8 → Q7.10 signed 18-bit
-#   - Running mean with alpha shift of 11
-#   - Subtract mean from sample
+# Stage 2: DC Offset removal — matches dc_offset.sv exactly
+#
+# Conversion: flip MSB to go unsigned→sign-magnitude, then
+# shift left by FRACTIONAL_BITS to get Q7.10 (18-bit signed).
+# SV line: {~sample_i[MSB], sample_i[6:0], {FRACTIONAL_BITS{0}}}
+#
+# Running mean uses RUNNING_SUM_ALPHA=11 right-shift, with ±1
+# nudge when the update would otherwise be zero.
+#
+# Key: correction uses next_mean (updated mean), not old mean.
 # ============================================================
 def dc_offset(sample_i: np.ndarray, sample_q: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Fixed-point DC offset removal matching dc_offset.sv.
-
-    Conversion: flip MSB to go from unsigned → sign-magnitude,
-    then shift left by FRACTIONAL_BITS (10) to get Q7.10 format.
-    This matches the SystemVerilog line:
-        {~sample_i[SAMPLE_DW-1], sample_i[SAMPLE_DW-2:0], {FRACTIONAL_BITS{0}}}
-    """
     print("[DC Offset] Removing DC bias...")
     n = len(sample_i)
 
-    # Convert uint8 → signed Q7.10 (18-bit)
-    # Flip MSB: XOR with 0x80 converts offset binary to sign-magnitude
     def to_q7_10(x: np.ndarray) -> np.ndarray:
-        flipped = x.astype(np.int32) ^ 0x80   # flip MSB
-        # re-interpret as signed 8-bit range (-128..127)
-        signed = np.where(flipped >= 128, flipped - 256, flipped)
+        flipped = x.astype(np.int32) ^ 0x80
+        signed  = np.where(flipped >= 128, flipped - 256, flipped)
         return (signed << FRACTIONAL_BITS).astype(np.int32)
 
     si = to_q7_10(sample_i)
@@ -110,15 +129,13 @@ def dc_offset(sample_i: np.ndarray, sample_q: np.ndarray) -> tuple[np.ndarray, n
         upd_i = diff_i >> RUNNING_SUM_ALPHA
         upd_q = diff_q >> RUNNING_SUM_ALPHA
 
-        # Nudge by ±1 if update rounded to zero but diff was nonzero
-        if upd_i == 0 and diff_i > 0: upd_i = np.int32(1)
+        if   upd_i == 0 and diff_i > 0: upd_i = np.int32(1)
         elif upd_i == 0 and diff_i < 0: upd_i = np.int32(-1)
-        if upd_q == 0 and diff_q > 0: upd_q = np.int32(1)
+        if   upd_q == 0 and diff_q > 0: upd_q = np.int32(1)
         elif upd_q == 0 and diff_q < 0: upd_q = np.int32(-1)
 
-        mean_i = mean_i + upd_i
-        mean_q = mean_q + upd_q
-
+        mean_i += upd_i
+        mean_q += upd_q
         corr_i[k] = si[k] - mean_i
         corr_q[k] = sq[k] - mean_q
 
@@ -127,242 +144,228 @@ def dc_offset(sample_i: np.ndarray, sample_q: np.ndarray) -> tuple[np.ndarray, n
 
 
 # ============================================================
-# Stage 3: Low Pass Filter
-# Matches lpf_wrapper.sv — Xilinx FIR Compiler IP.
-# We approximate it here with the same firwin design using
-# the coefficients from lpf_coeffs.coe (90 kHz cutoff, 18-bit input).
+# Stage 3: Low Pass Filter — approximates lpf_wrapper.sv
+# (Xilinx FIR Compiler IP with coefficients from lpf_coeffs.coe)
+# Cutoff 90 kHz at 220500 Hz sample rate, 64-tap Hamming window.
+# Result truncated to int32 to stay in fixed-point world.
 # ============================================================
 def low_pass_filter(corr_i: np.ndarray, corr_q: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """
-    FIR low-pass filter matching lpf_wrapper.sv.
-    Cutoff at 90 kHz relative to SDR sample rate of 220500 Hz.
-    Uses floating-point here since we're approximating the IP behavior.
-    """
-    print("[LPF] Applying low-pass filter (cutoff=90kHz)...")
-    nyquist = SDR_SAMPLE_RATE / 2.0
+    print("[LPF] Applying low-pass filter (cutoff=90 kHz)...")
+    nyquist     = SDR_SAMPLE_RATE / 2.0
     cutoff_norm = 90_000 / nyquist
     taps = firwin(64, cutoff_norm, window="hamming")
-
-    lpf_i = lfilter(taps, 1.0, corr_i.astype(np.float64))
-    lpf_q = lfilter(taps, 1.0, corr_q.astype(np.float64))
-
-    # Convert back to int32 to stay in fixed-point world
-    lpf_i = lpf_i.astype(np.int32)
-    lpf_q = lpf_q.astype(np.int32)
+    lpf_i = lfilter(taps, 1.0, corr_i.astype(np.float64)).astype(np.int32)
+    lpf_q = lfilter(taps, 1.0, corr_q.astype(np.float64)).astype(np.int32)
     print("[LPF] Done.")
     return lpf_i, lpf_q
 
 
 # ============================================================
-# Stage 4: Decimation
-# Matches decimation.sv — keep every 6th valid sample.
-# Also truncates from DATA_DW (18-bit) to 16-bit by dropping 2 LSBs.
+# Stage 4: FM Demodulate — IQ discriminator (matches fm_receiver.py)
+#
+#   dI = I[n] - I[n-1],  dQ = Q[n] - Q[n-1]
+#   num = I*dQ - Q*dI
+#   den = I^2 + Q^2   (clamped to avoid divide-by-zero)
+#   audio = (num / den) * (SDR_RATE / (2*pi*MAX_DEV))
+#
+# Operates on the int32 LPF output at full SDR rate.
+# Division uses float64 for precision; result clipped to 16-bit signed.
 # ============================================================
-def decimation(lpf_i: np.ndarray, lpf_q: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Downsample by DECIM_FACTOR=6, matching decimation.sv.
-    Keeps sample at count==0 (every 6th), drops the rest.
-    Truncates to 16-bit by taking bits [17:2] (dropping 2 LSBs).
-    """
-    print(f"[Decimation] Downsampling by {DECIM_FACTOR} ({SDR_SAMPLE_RATE} → {AUDIO_SAMPLE_RATE} Hz)...")
-    decim_i = (lpf_i[::DECIM_FACTOR] >> 2).astype(np.int16)
-    decim_q = (lpf_q[::DECIM_FACTOR] >> 2).astype(np.int16)
-    print(f"[Decimation] Done. {len(decim_i)} samples remaining.")
-    return decim_i, decim_q
+def fm_demodulate(lpf_i: np.ndarray, lpf_q: np.ndarray) -> np.ndarray:
+    print("[FM Demod] Running IQ discriminator (SDR rate)...")
+    i = lpf_i.astype(np.int64)
+    q = lpf_q.astype(np.int64)
 
+    di = np.diff(i, prepend=i[0])
+    dq = np.diff(q, prepend=q[0])
 
-# ============================================================
-# Stage 5: FM Demodulate
-# Matches fm_demodulate.sv — IQ discriminator:
-#   numerator   = I*dQ - Q*dI
-#   denominator = I^2 + Q^2
-#   audio       = numerator / denominator  (scaled)
-# ============================================================
-def fm_demodulate(decim_i: np.ndarray, decim_q: np.ndarray) -> np.ndarray:
-    """
-    FM IQ discriminator matching fm_demodulate.sv.
-    Operates on 16-bit signed I/Q samples.
-    Returns 16-bit signed audio samples.
-    """
-    print("[FM Demod] Running IQ discriminator...")
-    i = decim_i.astype(np.int32)
-    q = decim_q.astype(np.int32)
+    num = i * dq - q * di
+    den = i * i + q * q
+    den = np.where(den < 16, 16, den)
 
-    # Stage 1: delta (difference from previous sample)
-    di = np.diff(i, prepend=i[0])   # dI = I[n] - I[n-1]
-    dq = np.diff(q, prepend=q[0])   # dQ = Q[n] - Q[n-1]
+    # Scale to fill int16 range: equivalent to SV's K = round(32767 * SDR_RATE / (2π * MAX_DEV))
+    scale = 32767.0 * SDR_SAMPLE_RATE / (2 * np.pi * MAX_FREQ_DEV)
+    audio = np.clip((num / den.astype(np.float64)) * scale, -32768, 32767).astype(np.int16)
 
-    # Stage 2: numerator and denominator
-    numerator   = i * dq - q * di                    # I*dQ - Q*dI
-    denominator = i * i + q * q                      # I^2 + Q^2
-
-    # Stage 3: clamp denominator to avoid divide-by-zero (matches EPSILON=16)
-    denominator = np.where(denominator < 16, 16, denominator)
-
-    # Stage 4: divide
-    quot = numerator / denominator.astype(np.float64)
-
-    # Stage 5: scale — SDR_RATE / (2*pi*MAX_FREQ_DEV)
-    scale = SDR_SAMPLE_RATE / (2 * np.pi * MAX_FREQ_DEV)
-    scaled = quot * scale
-
-    # Stage 6: saturate to 16-bit signed
-    sat_max =  32767
-    sat_min = -32768
-    audio = np.clip(scaled, sat_min, sat_max).astype(np.int16)
-
-    print(f"[FM Demod] Done. Peak amplitude: {np.max(np.abs(audio))}")
+    print(f"[FM Demod] Done. Peak: {np.max(np.abs(audio))}")
     return audio
 
 
 # ============================================================
-# Stage 6: De-emphasis
-# Matches de_emphasis.sv — first-order IIR in Q0.16 fixed point:
-#   acc[n] = ALPHA_FP * y[n-1] + ONE_MINUS_ALPHA * x[n]
-#   y[n]   = acc[n] >> 16
-# Output sign-extended to PCM_IN_W (18-bit).
+# Stage 5: Decimation — keep every DECIM_FACTOR-th sample
+# Matches the concept in decimation.sv (mod-N counter, keep at count=0).
 # ============================================================
-def de_emphasis(audio: np.ndarray) -> np.ndarray:
-    """
-    First-order IIR de-emphasis matching de_emphasis.sv.
-    Coefficients computed for fs=36750 Hz, tau=75us.
-    """
-    print("[De-emphasis] Applying 75µs IIR filter...")
-    n = len(audio)
-    y_prev = np.int32(0)
-    out = np.zeros(n, dtype=np.int32)
-
-    for k in range(n):
-        x = np.int32(audio[k])
-        # acc = ALPHA_FP * y[n-1] + ONE_MINUS_ALPHA * x[n]
-        acc = np.int64(ALPHA_FP) * np.int64(y_prev) + np.int64(ONE_MINUS_ALPHA) * np.int64(x)
-        # shift right 16 to remove Q0.16 scale
-        y_curr = np.int32(acc >> 16)
-        out[k] = y_curr
-        y_prev = y_curr
-
-    # Sign-extend to PCM_IN_W (18-bit) — in Python just keep as int32
-    # Clip to 18-bit signed range
-    max_18 =  (1 << (PCM_IN_W - 1)) - 1   #  131071
-    min_18 = -(1 << (PCM_IN_W - 1))        # -131072
-    out = np.clip(out, min_18, max_18)
-
-    print("[De-emphasis] Done.")
+def decimation(demod_audio: np.ndarray) -> np.ndarray:
+    print(f"[Decimation] {SDR_SAMPLE_RATE} → {AUDIO_SAMPLE_RATE} Hz "
+          f"(factor {DECIM_FACTOR})...")
+    out = demod_audio[::DECIM_FACTOR]
+    print(f"[Decimation] Done. {len(out):,} samples remaining.")
     return out
 
 
 # ============================================================
-# Play audio
+# Stage 6: De-emphasis — matches de_emphasis.sv exactly
+#
+# First-order IIR in Q0.16 fixed point:
+#   acc    = ALPHA_FP * y[n-1] + ONE_MINUS_ALPHA * x[n]
+#   y[n]   = acc[31:16]   (drop lower 16 bits = >>16)
+# Output sign-extended to PCM_IN_W (18-bit).
 # ============================================================
-def play_audio(audio: np.ndarray, fs: int) -> None:
+def de_emphasis(audio: np.ndarray) -> np.ndarray:
+    print("[De-emphasis] Applying 75 µs IIR filter...")
+    n = len(audio)
+    y_prev = np.int32(0)
+    out    = np.zeros(n, dtype=np.int32)
+
+    for k in range(n):
+        x     = np.int32(audio[k])
+        acc   = np.int64(ALPHA_FP) * np.int64(y_prev) + np.int64(ONE_MINUS_ALPHA) * np.int64(x)
+        y_curr = np.int32(acc >> 16)
+        out[k] = y_curr
+        y_prev = y_curr
+
+    max_18 =  (1 << (PCM_IN_W - 1)) - 1   #  131071
+    min_18 = -(1 << (PCM_IN_W - 1))        # -131072
+    out = np.clip(out, min_18, max_18)
+    print("[De-emphasis] Done.")
+    return out
+
+# ============================================================
+# Audio Playback Helpers
+# ============================================================
+def play_audio_scaled(audio: np.ndarray, fs: int) -> None:
     """
-    Normalize and play through MacBook speaker via sounddevice.
+    Playback with normalization/scaling (current behavior).
     """
     peak = np.max(np.abs(audio))
+
     if peak == 0:
-        print("[Play] Audio is silent, nothing to play.")
+        print("[Play Scaled] Audio is silent.")
         return
 
-    normalized = (audio / peak * 0.9).astype(np.float32)
-    print(f"[Play] Playing {len(normalized)/fs:.2f}s of audio at {fs} Hz...")
-    sd.play(normalized, samplerate=fs)
-    sd.wait()
-    print("[Play] Done.")
+    norm = (audio / peak * 0.9).astype(np.float32)
+
+    print(f"[Play Scaled] {len(norm)/fs:.2f}s @ {fs} Hz...")
+    try:
+        sd.play(norm, samplerate=fs)
+        sd.wait()
+    except Exception as e:
+        print(f"[Play Scaled] Skipped: {e}")
+
+
+def play_audio_raw(audio: np.ndarray, fs: int) -> None:
+    """
+    Playback with NO scaling or normalization.
+    Sends raw float32 values directly to the audio device.
+    """
+    raw = audio.astype(np.float32)
+
+    print(f"[Play Raw] {len(raw)/fs:.2f}s @ {fs} Hz...")
+    print(f"[Play Raw] Peak sample value = {np.max(np.abs(raw))}")
+
+    try:
+        sd.play(raw, samplerate=fs)
+        sd.wait()
+    except Exception as e:
+        print(f"[Play Raw] Skipped: {e}")
 
 
 # ============================================================
-# Plot pipeline stages
+# WAV Save Helpers
 # ============================================================
-def plot_pipeline(raw_i, raw_q, corr_i, corr_q,
-                  lpf_i, lpf_q, decim_i, decim_q,
-                  demod, deemph) -> None:
+def save_wav_scaled(audio: np.ndarray, fs: int, path: str) -> None:
+    """
+    Save normalized/scaled WAV.
+    """
+    peak = np.max(np.abs(audio))
 
-    fig, axes = plt.subplots(5, 1, figsize=(13, 12))
-    fig.suptitle("FPGA Pipeline Simulation — RF Raiders (Team 16)", fontsize=13)
+    if peak > 0:
+        out = (audio / peak * 0.9).astype(np.float32)
+    else:
+        out = audio.astype(np.float32)
 
-    n = min(500, len(raw_i))
+    sf.write(path, out, fs)
+    print(f"[WAV] Saved scaled WAV → '{path}'")
 
-    axes[0].plot(raw_i[:n], label="I", lw=0.8)
-    axes[0].plot(raw_q[:n], label="Q", lw=0.8)
-    axes[0].set_title("Stage 1 — Raw I/Q from CSV (uint8)")
-    axes[0].legend(); axes[0].grid(True)
 
-    axes[1].plot(corr_i[:n], label="I", lw=0.8)
-    axes[1].plot(corr_q[:n], label="Q", lw=0.8)
-    axes[1].set_title("Stage 2 — After DC Offset Removal (Q7.10)")
-    axes[1].legend(); axes[1].grid(True)
+def save_wav_raw(audio: np.ndarray, fs: int, path: str) -> None:
+    """
+    Save raw WAV with absolutely no scaling.
+    """
+    out = audio.astype(np.float32)
 
-    n2 = min(500, len(lpf_i))
-    axes[2].plot(lpf_i[:n2], label="I", lw=0.8)
-    axes[2].plot(lpf_q[:n2], label="Q", lw=0.8)
-    axes[2].set_title("Stage 3+4 — After LPF + Decimation (16-bit)")
-    axes[2].legend(); axes[2].grid(True)
-
-    n3 = min(500, len(demod))
-    axes[3].plot(demod[:n3], lw=0.8, color="purple")
-    axes[3].set_title("Stage 5 — FM Demodulated Audio (16-bit)")
-    axes[3].grid(True)
-
-    axes[4].plot(deemph[:n3], lw=0.8, color="crimson")
-    axes[4].set_title("Stage 6 — After De-emphasis (18-bit, final output)")
-    axes[4].grid(True)
-
-    plt.tight_layout()
-    plt.savefig("fpga_pipeline_sim.png", dpi=150)
-    print("[Plot] Saved → fpga_pipeline_sim.png")
-    plt.show()
-
+    sf.write(path, out, fs)
+    print(f"[WAV] Saved raw WAV → '{path}'")
 
 # ============================================================
 # Main
 # ============================================================
 def main():
-    parser = argparse.ArgumentParser(description="FPGA Pipeline Simulation from CSV I/Q")
-    parser.add_argument("csv", nargs="+", help="One or more CSV files (IQ_DATA_1000_*.csv)")
-    parser.add_argument("--no-play", action="store_true", help="Skip audio playback")
-    parser.add_argument("--no-plot", action="store_true", help="Skip plots")
+    parser = argparse.ArgumentParser(
+        description="FPGA Pipeline Simulation — feed song_stage0_raw_iq.csv to compare with RTL."
+    )
+    parser.add_argument("csv", nargs="+",
+                        help="One or more CSVs with Sample_Index,I,Q columns (uint8 values).")
+    parser.add_argument("--no-play",  action="store_true", help="Skip audio playback.")
     args = parser.parse_args()
 
     print("=" * 55)
-    print("  FPGA Pipeline Simulation — RF Raiders (Team 16)")
+    print("  FPGA Pipeline Simulation")
     print("=" * 55)
+
+    out_dir = os.path.dirname(os.path.abspath(args.csv[0]))
 
     # Stage 1: Load
     raw_i, raw_q = load_csv(args.csv)
 
-    # Stage 2: DC offset
+    # Stage 2: DC offset removal
     corr_i, corr_q = dc_offset(raw_i, raw_q)
+    save_stage_csv(np.column_stack([corr_i, corr_q]),
+                   os.path.join(out_dir, "fpga_stage1_dc_removed.csv"), "DC removed (I,Q)")
 
     # Stage 3: LPF
     lpf_i, lpf_q = low_pass_filter(corr_i, corr_q)
+    save_stage_csv(np.column_stack([lpf_i, lpf_q]),
+                   os.path.join(out_dir, "fpga_stage2_lpf.csv"), "LPF output (I,Q)")
 
-    # Stage 4: Decimation
-    decim_i, decim_q = decimation(lpf_i, lpf_q)
+    # Stage 4: FM Demodulate
+    demod = fm_demodulate(lpf_i, lpf_q)
+    save_stage_csv(demod, os.path.join(out_dir, "fpga_stage3_demod.csv"),
+                   "FM demod (mono, SDR rate)")
 
-    # Stage 5: FM demodulate
-    demod = fm_demodulate(decim_i, decim_q)
+    # Stage 5: Decimation (220500 → 36750 Hz)
+    decim = decimation(demod)
+    save_stage_csv(decim, os.path.join(out_dir, "fpga_stage4_decimated.csv"),
+                   "Decimated audio")
 
     # Stage 6: De-emphasis
-    deemph = de_emphasis(demod)
+    deemph = de_emphasis(decim)
+    save_stage_csv(deemph, os.path.join(out_dir, "fpga_stage5_deemphasis.csv"),
+                   "De-emphasis output")
 
-    # Export golden reference files for RTL comparison
-    np.savetxt("golden_output.txt", deemph, fmt="%d")
-    np.savetxt("golden_demod.txt",  demod,  fmt="%d")
-    print("[Golden] Saved golden_output.txt and golden_demod.txt")
+    # ============================================================
+    # Save BOTH WAV versions
+    # ============================================================
+    scaled_wav = os.path.join(out_dir, "fpga_pipeline_output_scaled.wav")
+    raw_wav    = os.path.join(out_dir, "fpga_pipeline_output_raw.wav")
 
-    # Play
+    save_wav_scaled(deemph, AUDIO_SAMPLE_RATE, scaled_wav)
+    save_wav_raw(deemph, AUDIO_SAMPLE_RATE, raw_wav)
+
+    # ============================================================
+    # Playback BOTH versions
+    # ============================================================
     if not args.no_play:
-        play_audio(deemph, AUDIO_SAMPLE_RATE)
 
-    # Plot
-    if not args.no_plot:
-        plot_pipeline(raw_i, raw_q, corr_i, corr_q,
-                      lpf_i, lpf_q, decim_i, decim_q,
-                      demod, deemph)
+        print("\n--- Playing SCALED version ---")
+        play_audio_scaled(deemph, AUDIO_SAMPLE_RATE)
 
-    print("=" * 55)
-    print("  Pipeline complete.")
-    print("=" * 55)
+        print("\n--- Playing RAW version ---")
+        play_audio_raw(deemph, AUDIO_SAMPLE_RATE)
+
+        print("=" * 55)
+        print("  Pipeline complete.")
+        print("=" * 55)
 
 
 if __name__ == "__main__":

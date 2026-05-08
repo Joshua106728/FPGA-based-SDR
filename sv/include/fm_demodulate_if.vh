@@ -1,33 +1,32 @@
-`ifndef FM_DEMODULATE_IF_VH
-`define FM_DEMODULATE_IF_VH
 
-// all types
-// `include "types.sv"
+`timescale 1ns/1ps
+
+`ifndef FM_DEMODULATE_IF
+`define FM_DEMODULATE_IF
+
+`include "../include/types.sv"
+import types::*;
 
 interface fm_demodulate_if;
-  // import types
-//   import types::*;
 
-  // inputs
-  logic i_valid;
-  logic [15:0] i_i, i_q;
-//   logic [IN_W-1:0] i_i, i_q;  
+    // INPUT
+    logic signed [DATA_DW-1:0] lpf_i, lpf_q;
+    logic lpf_valid;
 
-  // outputs
-  logic o_valid;
-  logic [15:0] o_audio;
-//   logic [OUT_W-1:0] o_audio;
+    // OUTPUT
+    logic signed [DATA_DW-1:0] demod_sample;
+    logic demod_valid;
 
-  // ports
-  modport fd (
-    input   i_valid, i_i, i_q,
-    output  o_valid, o_audio
-  );
-  // tb
-  modport tb (
-    output  i_valid, i_i, i_q,
-    input   o_valid, o_audio
-  );
+    modport fm_demodulate_inst (
+        input lpf_i, lpf_q, lpf_valid,
+        output demod_sample, demod_valid
+    );
+
+    modport fm_demodulate_tb (
+        input demod_sample, demod_valid,
+        output lpf_i, lpf_q, lpf_valid
+    );
+    
 endinterface
 
-`endif //FM_DEMODULATE_IF_VH
+`endif

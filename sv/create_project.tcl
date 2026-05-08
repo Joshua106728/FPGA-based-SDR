@@ -38,6 +38,62 @@ generate_target all [get_ips low_pass_filter]
 ##################################################################
 
 ##################################################################
+# CREATE IP div
+##################################################################
+
+set div [create_ip -name div_gen -vendor xilinx.com -library ip -version 5.1 -module_name div]
+
+# User Parameters
+set_property -dict [list \
+  CONFIG.ARESETN {true} \
+  CONFIG.algorithm_type {High_Radix} \
+  CONFIG.dividend_and_quotient_width {32} \
+  CONFIG.divisor_width {24} \
+  CONFIG.fractional_width {0} \
+  CONFIG.latency {26} \
+  CONFIG.remainder_type {Fractional} \
+] [get_ips div]
+
+# Runtime Parameters
+set_property -dict { 
+  GENERATE_SYNTH_CHECKPOINT {1}
+} $div
+
+generate_target all [get_ips div]
+##################################################################
+
+##################################################################
+# CREATE IP ila_debug
+##################################################################
+
+set ila_debug [create_ip -name ila -vendor xilinx.com -library ip -version 6.2 -module_name ila_debug]
+
+set_property -dict [list \
+  CONFIG.C_NUM_OF_PROBES  {12}   \
+  CONFIG.C_DATA_DEPTH     {1024} \
+  CONFIG.C_TRIGIN_EN      {false} \
+  CONFIG.C_TRIGOUT_EN     {false} \
+  CONFIG.ALL_PROBE_SAME_MU      {true} \
+  CONFIG.ALL_PROBE_SAME_MU_CNT  {1}    \
+  CONFIG.C_PROBE0_WIDTH   {3}    \
+  CONFIG.C_PROBE1_WIDTH   {8}    \
+  CONFIG.C_PROBE2_WIDTH   {8}    \
+  CONFIG.C_PROBE3_WIDTH   {1}    \
+  CONFIG.C_PROBE4_WIDTH   {18}   \
+  CONFIG.C_PROBE5_WIDTH   {18}   \
+  CONFIG.C_PROBE6_WIDTH   {1}    \
+  CONFIG.C_PROBE7_WIDTH   {18}   \
+  CONFIG.C_PROBE8_WIDTH   {1}    \
+  CONFIG.C_PROBE9_WIDTH   {18}   \
+  CONFIG.C_PROBE10_WIDTH  {1}    \
+  CONFIG.C_PROBE11_WIDTH  {3}    \
+] [get_ips ila_debug]
+
+set_property -dict {GENERATE_SYNTH_CHECKPOINT {1}} $ila_debug
+generate_target all [get_ips ila_debug]
+##################################################################
+
+##################################################################
 # INCLUDE DIRECTORY
 ##################################################################
 set include_path [file normalize "./include"]

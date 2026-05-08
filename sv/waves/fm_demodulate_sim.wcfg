@@ -1,0 +1,127 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<wave_config>
+   <wave_state>
+   </wave_state>
+   <db_ref_list>
+      <db_ref path="fm_demodulate_sim.wdb" id="1">
+         <top_modules>
+            <top_module name="fm_demodulate_tb" />
+            <top_module name="types" />
+         </top_modules>
+      </db_ref>
+   </db_ref_list>
+   <zoom_setting>
+      <ZoomStartTime time="0.000 ns"></ZoomStartTime>
+      <ZoomEndTime time="576.276 ns"></ZoomEndTime>
+      <Cursor1Time time="85.446 ns"></Cursor1Time>
+   </zoom_setting>
+   <column_width_setting>
+      <NameColumnWidth column_width="321"></NameColumnWidth>
+      <ValueColumnWidth column_width="58"></ValueColumnWidth>
+   </column_width_setting>
+   <WVObjectSize size="26" />
+   <wvobject fp_name="/fm_demodulate_tb/clk" type="logic">
+      <obj_property name="ElementShortName">clk</obj_property>
+      <obj_property name="ObjectShortName">clk</obj_property>
+   </wvobject>
+   <wvobject fp_name="/fm_demodulate_tb/n_rst" type="logic">
+      <obj_property name="ElementShortName">n_rst</obj_property>
+      <obj_property name="ObjectShortName">n_rst</obj_property>
+   </wvobject>
+   <wvobject type="divider" fp_name="divider15">
+      <obj_property name="label">Input</obj_property>
+      <obj_property name="DisplayName">label</obj_property>
+   </wvobject>
+   <wvobject fp_name="/fm_demodulate_tb/fmif/lpf_i" type="array">
+      <obj_property name="ElementShortName">lpf_i[17:0]</obj_property>
+      <obj_property name="ObjectShortName">lpf_i[17:0]</obj_property>
+   </wvobject>
+   <wvobject fp_name="/fm_demodulate_tb/fmif/lpf_q" type="array">
+      <obj_property name="ElementShortName">lpf_q[17:0]</obj_property>
+      <obj_property name="ObjectShortName">lpf_q[17:0]</obj_property>
+   </wvobject>
+   <wvobject fp_name="/fm_demodulate_tb/fmif/lpf_valid" type="logic">
+      <obj_property name="ElementShortName">lpf_valid</obj_property>
+      <obj_property name="ObjectShortName">lpf_valid</obj_property>
+   </wvobject>
+   <wvobject type="divider" fp_name="divider16">
+      <obj_property name="label">Output</obj_property>
+      <obj_property name="DisplayName">label</obj_property>
+   </wvobject>
+   <wvobject fp_name="/fm_demodulate_tb/fmif/demod_sample" type="array">
+      <obj_property name="ElementShortName">demod_sample[17:0]</obj_property>
+      <obj_property name="ObjectShortName">demod_sample[17:0]</obj_property>
+   </wvobject>
+   <wvobject fp_name="/fm_demodulate_tb/fmif/demod_valid" type="logic">
+      <obj_property name="ElementShortName">demod_valid</obj_property>
+      <obj_property name="ObjectShortName">demod_valid</obj_property>
+   </wvobject>
+   <wvobject type="divider" fp_name="divider17">
+      <obj_property name="label">Internal</obj_property>
+      <obj_property name="DisplayName">label</obj_property>
+   </wvobject>
+   <wvobject fp_name="/fm_demodulate_tb/DUT/prev_i" type="array">
+      <obj_property name="ElementShortName">prev_i[17:0]</obj_property>
+      <obj_property name="ObjectShortName">prev_i[17:0]</obj_property>
+   </wvobject>
+   <wvobject fp_name="/fm_demodulate_tb/DUT/prev_q" type="array">
+      <obj_property name="ElementShortName">prev_q[17:0]</obj_property>
+      <obj_property name="ObjectShortName">prev_q[17:0]</obj_property>
+   </wvobject>
+   <wvobject fp_name="/fm_demodulate_tb/DUT/curr_i" type="array">
+      <obj_property name="ElementShortName">curr_i[17:0]</obj_property>
+      <obj_property name="ObjectShortName">curr_i[17:0]</obj_property>
+   </wvobject>
+   <wvobject fp_name="/fm_demodulate_tb/DUT/curr_q" type="array">
+      <obj_property name="ElementShortName">curr_q[17:0]</obj_property>
+      <obj_property name="ObjectShortName">curr_q[17:0]</obj_property>
+   </wvobject>
+   <wvobject fp_name="/fm_demodulate_tb/DUT/demod_val" type="logic">
+      <obj_property name="ElementShortName">demod_val</obj_property>
+      <obj_property name="ObjectShortName">demod_val</obj_property>
+   </wvobject>
+   <wvobject fp_name="/fm_demodulate_tb/DUT/div_val" type="logic">
+      <obj_property name="ElementShortName">div_val</obj_property>
+      <obj_property name="ObjectShortName">div_val</obj_property>
+   </wvobject>
+   <wvobject fp_name="/fm_demodulate_tb/DUT/num_sub" type="array">
+      <obj_property name="ElementShortName">num_sub[36:0]</obj_property>
+      <obj_property name="ObjectShortName">num_sub[36:0]</obj_property>
+   </wvobject>
+   <wvobject fp_name="/fm_demodulate_tb/DUT/denom_add" type="array">
+      <obj_property name="ElementShortName">denom_add[36:0]</obj_property>
+      <obj_property name="ObjectShortName">denom_add[36:0]</obj_property>
+   </wvobject>
+   <wvobject fp_name="/fm_demodulate_tb/DUT/num_i" type="array">
+      <obj_property name="ElementShortName">num_i[35:0]</obj_property>
+      <obj_property name="ObjectShortName">num_i[35:0]</obj_property>
+   </wvobject>
+   <wvobject fp_name="/fm_demodulate_tb/DUT/num_q" type="array">
+      <obj_property name="ElementShortName">num_q[35:0]</obj_property>
+      <obj_property name="ObjectShortName">num_q[35:0]</obj_property>
+   </wvobject>
+   <wvobject fp_name="/fm_demodulate_tb/DUT/denom_i" type="array">
+      <obj_property name="ElementShortName">denom_i[35:0]</obj_property>
+      <obj_property name="ObjectShortName">denom_i[35:0]</obj_property>
+   </wvobject>
+   <wvobject fp_name="/fm_demodulate_tb/DUT/denom_q" type="array">
+      <obj_property name="ElementShortName">denom_q[35:0]</obj_property>
+      <obj_property name="ObjectShortName">denom_q[35:0]</obj_property>
+   </wvobject>
+   <wvobject fp_name="/fm_demodulate_tb/DUT/num" type="array">
+      <obj_property name="ElementShortName">num[31:0]</obj_property>
+      <obj_property name="ObjectShortName">num[31:0]</obj_property>
+   </wvobject>
+   <wvobject fp_name="/fm_demodulate_tb/DUT/denom" type="array">
+      <obj_property name="ElementShortName">denom[23:0]</obj_property>
+      <obj_property name="ObjectShortName">denom[23:0]</obj_property>
+   </wvobject>
+   <wvobject fp_name="/fm_demodulate_tb/DUT/div_done" type="logic">
+      <obj_property name="ElementShortName">div_done</obj_property>
+      <obj_property name="ObjectShortName">div_done</obj_property>
+   </wvobject>
+   <wvobject fp_name="/fm_demodulate_tb/DUT/div_result" type="array">
+      <obj_property name="ElementShortName">div_result[55:0]</obj_property>
+      <obj_property name="ObjectShortName">div_result[55:0]</obj_property>
+   </wvobject>
+</wave_config>

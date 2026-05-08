@@ -1,11 +1,11 @@
+
 `timescale 1ns / 1ps
 `include "../include/types.sv"
 `include "../include/i2s_if.vh"
 import types::*;
 
-module i2s_master_tx #(
-    parameter int WORD_BITS = types::PCM_W
-)(
+module i2s_master_tx 
+(
     input  logic clk,
     input  logic n_rst,
     i2s_if.i2s_master_tx_inst i2sif
@@ -18,10 +18,9 @@ module i2s_master_tx #(
     logic bclk_next;
     logic bclk_fall;
     logic in_right = 1'b0;
-    logic in_delay = 1'b1;
-    logic [$clog2(WORD_BITS)-1:0] bit_index = '0;
+    logic [$clog2(PCM_W)-1:0] bit_index = '0;
     logic sample_tick;
-    logic signed [WORD_BITS-1:0] pcm16 = '0;
+    logic signed [PCM_W-1:0] pcm16 = '0;
 
     always_comb begin
         bclk_phase_next = bclk_phase + BCLK_STEP;
@@ -36,8 +35,7 @@ module i2s_master_tx #(
             i2sif.i2s_ws <= 1'b0;
             i2sif.i2s_sd <= 1'b0;
             in_right <= 1'b0;
-            in_delay <= 1'b1;
-            bit_index <= WORD_BITS - 1;
+            bit_index <= PCM_W - 1;
             sample_tick <= 1'b0;
         end else begin
             sample_tick <= 1'b0;
@@ -46,36 +44,37 @@ module i2s_master_tx #(
             i2sif.i2s_bclk <= bclk_next;
 
             if (bclk_fall) begin
-                if (in_delay) begin
-                    // Philips I2S: one bit-clock delay after WS transition before MSB.
-                    in_delay <= 1'b0;
-                    bit_index <= WORD_BITS - 1;
-                end else begin
-                    i2sif.i2s_sd <= pcm16[bit_index];
+                i2sif.i2s_sd <= pcm16[bit_index];
 
-                    if (bit_index == 0) begin
-                        // Toggle WS at word boundary; next BCLK is the MSB of the next word.
-                        in_right <= ~in_right;
-                        i2sif.i2s_ws <= ~in_right;
-                        in_delay <= 1'b1;
+                if (bit_index == 0) begin
+                    // WS transitions on LSB clock; MSB of next word appears one BCLK later (Philips I2S).
+                    in_right <= ~in_right;
+                    i2sif.i2s_ws <= ~in_right;
+                    bit_index <= PCM_W - 1;
 
-                        if (in_right) begin
-                            sample_tick <= 1'b1;
-                        end
-                    end else begin
-                        bit_index <= bit_index - 1'b1;
+                    if (in_right) begin
+                        sample_tick <= 1'b1;
                     end
+                end else begin
+                    bit_index <= bit_index - 1'b1;
                 end
             end
         end
     end
 
+    // Latch every incoming DSP sample; load into pcm16 on each I2S frame tick.
+    // sample_valid (~41.7 kHz) and sample_tick (~44.1 kHz) are 1-cycle pulses that
+    // rarely coincide on the same clock, so AND-ing them would starve the TX.
+    logic signed [PCM_W-1:0] audio_latch = '0;
+
     always_ff @(posedge clk) begin
-        if (~n_rst) begin
-            pcm16 <= '0;
-        end else if (sample_tick && i2sif.sample_valid) begin
-            pcm16 <= i2sif.sample_q18 >>> (PCM_IN_W - WORD_BITS);
-        end
+        if (~n_rst) audio_latch <= '0;
+        else if (i2sif.sample_valid) audio_latch <= i2sif.sample_q18[PCM_IN_W-1:2];
+    end
+
+    always_ff @(posedge clk) begin
+        if (~n_rst) pcm16 <= '0;
+        else if (sample_tick) pcm16 <= audio_latch;
     end
 
 endmodule
