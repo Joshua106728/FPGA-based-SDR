@@ -69,7 +69,7 @@ module i2s_master_tx
 
     always_ff @(posedge clk) begin
         if (~n_rst) audio_latch <= '0;
-        else if (i2sif.sample_valid) audio_latch <= i2sif.sample_q18[PCM_W-1:0];
+        else if (i2sif.sample_valid) audio_latch <= i2sif.sample_q18[PCM_IN_W-1:2];
     end
 
     always_ff @(posedge clk) begin

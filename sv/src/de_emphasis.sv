@@ -10,8 +10,9 @@ import types::*;
     de_emphasis_if.de_emphasis_inst deif
 );
     // Q0.16 coeffs for y[n] = a*y[n-1] + (1-a)*x[n]
-    localparam logic [15:0] ALPHA_FP        = 16'd65518;
-    localparam logic [15:0] ONE_MINUS_ALPHA = 16'd18;
+    // tau=75us, fs=41667 Hz (250kHz/6): a = round(exp(-1/(75e-6*41667)) * 65536)
+    localparam logic [15:0] ALPHA_FP        = 16'd47589;
+    localparam logic [15:0] ONE_MINUS_ALPHA = 16'd17947;
 
     // state + math — all 18-bit to match DATA_DW throughout the pipeline
     logic signed [DATA_DW-1:0] y_prev;  // y[n-1]
